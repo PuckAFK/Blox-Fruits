@@ -1,6 +1,8 @@
--- PuckAFK Blox Fruits v1.6.8 | Real dodge displacement + item-NPC/gear removed
-local __PUCK_SOURCE = [========[
--- PuckAFK Blox Fruits v1.4.8 | Primary baseline: newer place 2753915549 Blox Fruits.rbxl, supplied 2026-09-06.
+-- PuckAFK Blox Fruits v1.6.13 | Real Executor targeted compatibility + Sea 1 region portal routing.
+-- v1.6.13 fixes Auto Level trying to physically cross ~60,000 studs to Underwater City.
+-- Fishman/Underwater City uses Blox Fruits' requestEntrance transition; leaving it uses the return entrance before normal movement resumes.
+-- Flattened bootstrap: executes directly instead of compiling the whole script from a giant self-source string.
+-- Primary baseline: newer place 2753915549 Blox Fruits.rbxl, supplied 2026-09-06.
 -- v1.5.6 keeps the proven v1.5.5 combat/gear logic unchanged and reorganizes the UI
 -- into fewer tabs with collapsible advanced sections and clearer recommended paths.
 -- Native combat and quest APIs; never guesses combat remote payloads.
@@ -9,12 +11,52 @@ local __PUCK_SOURCE = [========[
 -- PuckUI v3.8.0 is bundled below with service-input connection cleanup. See accompanying inspection report.
 -- v1.6.7 removes the unreliable item-NPC / gear automation completely. Core farming, combat, movement, fruits, weapons, styles and Haki remain.
 -- v1.6.8 makes Auto Dodge physically displace the character with a short dedicated lateral burst instead of only retargeting the normal combat follow.
-local VERSION = "1.6.8"
+local VERSION = "1.6.14"
+-- v1.6.14: Real 2.5 UI capability fix; PlayerGui-first PuckUI + protected runtime dropdown refresh.
+
+-- Executor compatibility: some sandboxes expose a reduced `debug` table.
+-- xpcall only needs an error formatter, so never hard-depend on debug.traceback.
+local TRACEBACK = (type(debug) == "table" and type(debug.traceback) == "function" and debug.traceback)
+    or function(err) return tostring(err) end
 local Env = _G
 if type(getgenv) == "function" then
     local ok, result = pcall(getgenv)
     if ok and type(result) == "table" then Env = result end
 end
+
+-- Real Executor exposes getexecutorname/getexecutorversion/identifyexecutor. Detect it
+-- once so executor-sensitive code can prefer Real's documented native APIs.
+local EXECUTOR_NAME, EXECUTOR_VERSION = "Unknown", "Unknown"
+do
+    if type(identifyexecutor) == "function" then
+        local ok, name, version = pcall(identifyexecutor)
+        if ok then
+            if type(name) == "string" and name ~= "" then EXECUTOR_NAME = name end
+            if type(version) == "string" and version ~= "" then EXECUTOR_VERSION = version end
+        end
+    end
+    if EXECUTOR_NAME == "Unknown" and type(getexecutorname) == "function" then
+        local ok, name = pcall(getexecutorname)
+        if ok and type(name) == "string" and name ~= "" then EXECUTOR_NAME = name end
+    end
+    if EXECUTOR_VERSION == "Unknown" and type(getexecutorversion) == "function" then
+        local ok, version = pcall(getexecutorversion)
+        if ok and type(version) == "string" and version ~= "" then EXECUTOR_VERSION = version end
+    end
+end
+local IS_REAL = string.find(string.lower(EXECUTOR_NAME), "real", 1, true) ~= nil
+Env.__PUCKAFK_EXECUTOR_NAME = EXECUTOR_NAME
+Env.__PUCKAFK_EXECUTOR_VERSION = EXECUTOR_VERSION
+Env.__PUCKAFK_REAL_EXECUTOR = IS_REAL
+
+local function executorWindowActive()
+    if IS_REAL and type(isrbxactive) == "function" then
+        local ok, active = pcall(isrbxactive)
+        if ok then return active == true end
+    end
+    return true
+end
+
 local KEY = "__PUCKAFK_BLOXFRUITS_RUNTIME"
 if type(Env[KEY]) == "table" and type(Env[KEY].Shutdown) == "function" then
     Env[KEY]:Shutdown("Re-executed")
@@ -50,6 +92,7 @@ local Runtime = {
     Counters = {Targets = 0, Quests = 0, Recoveries = 0, FruitRolls = 0, FruitsCollected = 0, Purchases = 0, ServerHops = 0}, Modules = {},
     ServerStatus = "Idle", GachaStatus = "Idle", FruitShopStatus = "Not checked", FruitPickupStatus = "Idle", PurchaseStatus = "Idle",
     CombatHitPart = "None", CombatPath = "Idle", M1Status = "Waiting", CameraStatus = "Idle", DodgeStatus = "Watching",
+    ExecutorName = EXECUTOR_NAME, ExecutorVersion = EXECUTOR_VERSION, RealExecutor = IS_REAL,
 }
 Env[KEY] = Runtime
 local Config = {
@@ -78,7 +121,7 @@ local Config = {
     Debug = false,
 }
 Runtime.Config = Config
-local Movement, Combat, QuestService, EnemyService, UI, PrivacyService, ServerService, FruitGachaService, FruitShopService, FruitPickupService, CombatSkillService, PurchaseService, DodgeService
+local Movement, Combat, QuestService, EnemyService, UI, PrivacyService, ServerService, FruitGachaService, FruitShopService, FruitPickupService, CombatSkillService, PurchaseService, DodgeService, RegionService
 local function log(kind, message)
     message = tostring(message)
     if kind == "Error" then Runtime.LastError = message end
@@ -104,7 +147,7 @@ local function worker(name, callback)
     local record = {Started = os.clock()}
     Runtime.Workers[name] = record
     record.Thread = task.defer(function()
-        local ok, err = xpcall(callback, debug.traceback)
+        local ok, err = xpcall(callback, TRACEBACK)
         if Runtime.Workers[name] == record then Runtime.Workers[name] = nil end
         if not ok and Runtime.Running then log("Error", name .. ": " .. tostring(err)) end
     end)
@@ -1912,21 +1955,34 @@ local Motion = {
 }
 
 local function motionTween(object, duration, style, direction, properties)
-    if not object or not object.Parent then
-        return nil
+    -- Never let cosmetic UI animation crash the farm. This matters on Real, where
+    -- a lower-capability scheduler thread may be unable to touch a hidden UI tree.
+    if not object then return nil end
+    local alive = false
+    local readable = pcall(function() alive = object.Parent ~= nil end)
+    if not readable or not alive then return nil end
+
+    local ok, animation = pcall(function()
+        return TweenService:Create(
+            object,
+            TweenInfo.new(
+                duration or Motion.Tab,
+                style or Enum.EasingStyle.Quart,
+                direction or Enum.EasingDirection.Out
+            ),
+            properties
+        )
+    end)
+    if ok and animation then
+        pcall(animation.Play, animation)
+        return animation
     end
 
-    local animation = TweenService:Create(
-        object,
-        TweenInfo.new(
-            duration or Motion.Tab,
-            style or Enum.EasingStyle.Quart,
-            direction or Enum.EasingDirection.Out
-        ),
-        properties
-    )
-    animation:Play()
-    return animation
+    -- Animation is cosmetic. Best-effort direct assignment is sufficient fallback.
+    for key, value in pairs(properties or {}) do
+        pcall(function() object[key] = value end)
+    end
+    return nil
 end
 
 local function codeLabel(parent, text, size, color, zIndex)
@@ -1945,37 +2001,34 @@ local function codeLabel(parent, text, size, color, zIndex)
 end
 
 local function getGuiParent(screenGui)
-    -- Prefer PlayerGui. Some executor/plugin environments allow the initial
-    -- load thread to touch CoreGui/gethui(), but later task.spawn callbacks run
-    -- with a lower capability and then fail when updating those descendants.
-    -- PlayerGui keeps every UI instance accessible from normal game threads.
+    local function tryParent(target)
+        if not target then return nil end
+        local ok = pcall(function() screenGui.Parent = target end)
+        if ok then
+            local same = false
+            pcall(function() same = screenGui.Parent == target end)
+            if same then return target end
+        end
+        return nil
+    end
+
+    -- IMPORTANT FOR REAL EXECUTOR:
+    -- Real can let the initial execution thread access gethui()/RobloxGui while
+    -- later task.defer/task.spawn threads lose the Plugin capability required to
+    -- touch those descendants. PuckUI is updated continuously by the farm scheduler,
+    -- so PlayerGui must be the primary parent. gethui() is fallback-only.
     local playerGui = LocalPlayer and LocalPlayer:FindFirstChildOfClass("PlayerGui")
     if not playerGui and LocalPlayer then
-        playerGui = LocalPlayer:WaitForChild("PlayerGui", 10)
+        local ok, result = pcall(LocalPlayer.WaitForChild, LocalPlayer, "PlayerGui", 10)
+        if ok then playerGui = result end
     end
+    local parent = tryParent(playerGui)
+    if parent then return parent end
 
-    if playerGui then
-        local ok = pcall(function()
-            screenGui.Parent = playerGui
-        end)
-        if ok and screenGui.Parent == playerGui then
-            return playerGui
-        end
-    end
-
-    -- Compatibility fallback only when PlayerGui is genuinely unavailable.
     if type(gethui) == "function" then
         local ok, target = pcall(gethui)
-        if ok and target then
-            local parented = pcall(function()
-                screenGui.Parent = target
-            end)
-            if parented then
-                return target
-            end
-        end
+        if ok then return tryParent(target) end
     end
-
     return nil
 end
 
@@ -5548,6 +5601,53 @@ function RemoteService:Call(label, cooldown, args, callback, options)
     end
     return true
 end
+
+-- Sea 1 contains interior regions that are physically stored tens of thousands of studs
+-- away from the main ocean.  Smooth movement must NEVER try to cross that raw gap.
+-- The game exposes requestEntrance specifically for these transitions.
+local SEA1_UNDERWATER_ENTRANCE = Vector3.new(61163.8515625, 11.6796875, 1819.7841796875)
+local SEA1_MAIN_RETURN_ENTRANCE = Vector3.new(3864.8515625, 6.6796875, -1926.7841796875)
+RegionService = {Next = 0, PendingUntil = 0, Status = "Main world", LastRequested = nil}
+function RegionService:IsUnderwater(position)
+    return typeof(position) == "Vector3" and position.X > 30000
+end
+function RegionService:TransitionFor(destination, origin, reason)
+    if Runtime.Sea ~= "Sea1" or typeof(destination) ~= "Vector3" or typeof(origin) ~= "Vector3" then return false end
+    local destinationUnderwater = self:IsUnderwater(destination)
+    local currentUnderwater = self:IsUnderwater(origin)
+    if destinationUnderwater == currentUnderwater then
+        self.Status = destinationUnderwater and "Underwater City" or "Main world"
+        return false
+    end
+
+    if Movement then Movement:Cancel("Sea 1 region transition") end
+    local entering = destinationUnderwater and not currentUnderwater
+    local label = entering and "Entering Underwater City" or "Leaving Underwater City"
+    self.Status = label
+    state("REGION_TRAVEL", label .. (reason and (" · " .. tostring(reason)) or ""))
+
+    local now = os.clock()
+    if now < (self.PendingUntil or 0) then return true end
+    if now < (self.Next or 0) or RemoteService.Busy then return true end
+
+    local entrance = entering and SEA1_UNDERWATER_ENTRANCE or SEA1_MAIN_RETURN_ENTRANCE
+    self.Next = now + 1.25
+    self.PendingUntil = now + 2.5
+    self.LastRequested = entrance
+    local sent = RemoteService:Call("Entrance", 1.0, {"requestEntrance", entrance}, function(ok, response)
+        if ok then
+            self.Status = label .. " requested"
+            Runtime.ProgressAt = os.clock()
+        else
+            self.Status = label .. " failed: " .. tostring(response)
+            log("Error", self.Status)
+            self.PendingUntil = 0
+        end
+    end, {GenerationBound = false, Timeout = 8})
+    if not sent then self.PendingUntil = now + 0.25 end
+    return true
+end
+
 local function findModule(names)
     local direct = path(RS, table.unpack(names))
     if direct and direct:IsA("ModuleScript") then return direct end
@@ -5850,12 +5950,42 @@ function QuestService:RefreshNPCIndex()
     end)
 end
 function QuestService:Position(id, origin)
+    if typeof(origin) ~= "Vector3" then
+        local _, _, root = char()
+        origin = root and root.Position or Vector3.zero
+    end
     local best, distance
     local function consider(p)
+        if typeof(p) == "CFrame" then p = p.Position end
         if typeof(p) ~= "Vector3" then return end
-        local d = (p - origin).Magnitude
+        local ok, d = pcall(function() return (p - origin).Magnitude end)
+        if not ok or type(d) ~= "number" then return end
         if not distance or d < distance then best, distance = p, d end
     end
+
+    -- Real Executor-safe live NPC lookup. Keep expensive descendant indexing out of
+    -- Controller:Step: one bad/partially replicated NPC must never crash Auto Level.
+    local npcName = self:NPCName(id)
+    if npcName then
+        local ok, livePosition = pcall(function()
+            local folder = workspace:FindFirstChild("NPCs")
+            if not folder then return nil end
+            local npc = folder:FindFirstChild(npcName, true)
+            if not npc or (not npc:IsA("Model") and not npc:IsA("BasePart")) then return nil end
+            return pos(npc)
+        end)
+        if ok then consider(livePosition) end
+
+        -- Background cache is still useful, but reading it is optional and guarded.
+        pcall(function() self:RefreshNPCIndex() end)
+        local cached = self.NPCIndex and self.NPCIndex[npcName]
+        if type(cached) == "table" then
+            for _, position in ipairs(cached) do consider(position) end
+        end
+        if best then return best end
+    end
+
+    -- GuideModule data remains the first static fallback when no live NPC is replicated.
     local guide = Runtime.Modules.Guide
     if guide and guide.Data and type(guide.Data.NPCList) == "table" then
         for _, data in pairs(guide.Data.NPCList) do
@@ -5863,12 +5993,8 @@ function QuestService:Position(id, origin)
         end
     end
     if best then return best end
-    local npcName = self:NPCName(id)
-    if npcName then
-        self:RefreshNPCIndex()
-        for _, position in ipairs(self.NPCIndex and self.NPCIndex[npcName] or {}) do consider(position) end
-    end
-    if not best and Runtime.Sea == "Sea1" then
+
+    if Runtime.Sea == "Sea1" then
         for _, p in ipairs(GameData.sea1NPCPositions[id] or {}) do consider(vec(p)) end
     end
     return best
@@ -5982,7 +6108,7 @@ function QuestService:Reject(q, reason)
     release(reason)
 end
 
-Movement = {Connection = nil, Goal = nil, Owner = nil, Saved = {}, Failures = 0, Error = nil, EffectiveMode = nil, CombatTween = nil, CombatTweenGoal = nil, NextCombatTween = 0}
+Movement = {Connection = nil, Goal = nil, Owner = nil, Saved = {}, Failures = 0, Error = nil, EffectiveMode = nil, CombatTween = nil, CombatTweenGoal = nil, NextCombatTween = 0, BasisTarget = nil, BasisForward = nil, BasisRight = nil}
 function Movement:Restore()
     for part, saved in pairs(self.Saved) do
         if part.Parent then
@@ -6028,6 +6154,7 @@ function Movement:Cancel(reason)
         if h then h:Move(Vector3.zero); h:MoveTo(r.Position) end
     end
     self.Goal, self.Owner, self.RequestKey, self.EffectiveMode = nil, nil, nil, nil
+    self.BasisTarget, self.BasisForward, self.BasisRight = nil, nil, nil
     self:Restore()
 end
 function Movement:GoTo(owner, goal, tolerance, hold, requestKey)
@@ -6126,6 +6253,19 @@ function Movement:GoTo(owner, goal, tolerance, hold, requestKey)
     end)
     return self.Arrived
 end
+function Movement:ApproachCFrame(destination, origin, standOff, yOffset)
+    if typeof(destination) ~= "Vector3" then return nil end
+    origin = typeof(origin) == "Vector3" and origin or destination + Vector3.new(0, 0, 1)
+    standOff = math.max(0, tonumber(standOff) or 0)
+    yOffset = tonumber(yOffset) or 0
+    local horizontal = Vector3.new(origin.X - destination.X, 0, origin.Z - destination.Z)
+    if horizontal.Magnitude < 0.05 then horizontal = Vector3.new(0, 0, 1) else horizontal = horizontal.Unit end
+    local point = destination + horizontal * standOff + Vector3.new(0, yOffset, 0)
+    local aim = Vector3.new(destination.X, point.Y, destination.Z)
+    if (aim - point).Magnitude < 0.05 then aim = point - horizontal end
+    return CFrame.lookAt(point, aim)
+end
+
 function Movement:Position(targetRoot, weaponData)
     local d = math.max(0.5, tonumber(Config.Distance) or 3)
     local height = tonumber(Config.Height) or 0
@@ -6142,10 +6282,27 @@ function Movement:Position(targetRoot, weaponData)
     -- change slightly during combat/physics; transforming Above through the full target
     -- CFrame can therefore turn a fixed vertical offset into a moving one and cause drift.
     local targetPosition = targetRoot.Position
-    local forward = Vector3.new(targetRoot.CFrame.LookVector.X, 0, targetRoot.CFrame.LookVector.Z)
-    if forward.Magnitude < 0.05 then forward = Vector3.new(0, 0, -1) else forward = forward.Unit end
-    local right = Vector3.new(targetRoot.CFrame.RightVector.X, 0, targetRoot.CFrame.RightVector.Z)
-    if right.Magnitude < 0.05 then right = Vector3.new(1, 0, 0) else right = right.Unit end
+
+    -- Capture a stable yaw basis once per enemy. Attack animations frequently rotate
+    -- an NPC's HumanoidRootPart; recomputing Behind/Front/Side from that animated
+    -- rotation makes the destination jump around the target and looks like a bad tween.
+    if self.BasisTarget ~= targetRoot or not self.BasisForward or not self.BasisRight then
+        local _, _, myRoot = char()
+        local forward
+        if myRoot then
+            -- Stable farm basis: lock to the direction from us to the enemy at acquisition,
+            -- not the NPC's animated HumanoidRootPart yaw.
+            forward = Vector3.new(targetPosition.X - myRoot.Position.X, 0, targetPosition.Z - myRoot.Position.Z)
+        end
+        if not forward or forward.Magnitude < 0.05 then
+            local ok, look = pcall(function() return targetRoot.CFrame.LookVector end)
+            if ok and look then forward = Vector3.new(look.X, 0, look.Z) end
+        end
+        if not forward or forward.Magnitude < 0.05 then forward = Vector3.new(0, 0, -1) else forward = forward.Unit end
+        local right = Vector3.new(-forward.Z, 0, forward.X)
+        self.BasisTarget, self.BasisForward, self.BasisRight = targetRoot, forward, right
+    end
+    local forward, right = self.BasisForward, self.BasisRight
 
     local destination
     if mode == "Above" then
@@ -6672,13 +6829,23 @@ function Combat:Attack(entry, targetRoot, aimPart)
     end
 
     local fired = false
-    local okVIM, vim = pcall(game.GetService, game, "VirtualInputManager")
-    if okVIM and vim then
-        fired = pcall(function()
-            vim:SendMouseButtonEvent(x, y, 0, true, game, 0)
-            task.wait(0.03)
-            vim:SendMouseButtonEvent(x, y, 0, false, game, 0)
-        end)
+    -- Real's documented mouse1click is the most direct executor input path.
+    -- It intentionally no-ops while Roblox is not foreground, so only treat it
+    -- as authoritative when Real reports the client is active.
+    if IS_REAL and executorWindowActive() and type(mouse1click) == "function" then
+        fired = pcall(mouse1click)
+        if fired then Runtime.CombatPath = "Real mouse1click" end
+    end
+    if not fired then
+        local okVIM, vim = pcall(game.GetService, game, "VirtualInputManager")
+        if okVIM and vim then
+            fired = pcall(function()
+                vim:SendMouseButtonEvent(x, y, 0, true, game, 0)
+                task.wait(0.03)
+                vim:SendMouseButtonEvent(x, y, 0, false, game, 0)
+            end)
+            if fired then Runtime.CombatPath = "VirtualInputManager M1" end
+        end
     end
     if not fired and type(mouse1click) == "function" then fired = pcall(mouse1click) end
     if not fired then fired = pcall(entry.Tool.Activate, entry.Tool) end
@@ -6766,15 +6933,24 @@ function CombatSkillService:IsReady(tool, key)
 end
 function CombatSkillService:SendKey(key, down)
     local code = self.KeyCodes[key]
+    local virtualKey = self.VirtualKeys[key]
     local ok = false
-    local vim
-    pcall(function() vim = game:GetService("VirtualInputManager") end)
-    if vim and code then
-        ok = pcall(vim.SendKeyEvent, vim, down, code, false, game)
+
+    -- Real keypress/keyrelease explicitly take Windows virtual-key numbers.
+    if IS_REAL and executorWindowActive() then
+        local fn = down and (rawget(Env, "keypress") or rawget(_G, "keypress")) or (rawget(Env, "keyrelease") or rawget(_G, "keyrelease"))
+        if type(fn) == "function" and virtualKey then ok = pcall(fn, virtualKey) end
     end
+
+    if not ok then
+        local vim
+        pcall(function() vim = game:GetService("VirtualInputManager") end)
+        if vim and code then ok = pcall(vim.SendKeyEvent, vim, down, code, false, game) end
+    end
+
     if not ok then
         local fn = down and (rawget(Env, "keypress") or rawget(_G, "keypress")) or (rawget(Env, "keyrelease") or rawget(_G, "keyrelease"))
-        if type(fn) == "function" then ok = pcall(fn, self.VirtualKeys[key]) end
+        if type(fn) == "function" and virtualKey then ok = pcall(fn, virtualKey) end
     end
     return ok
 end
@@ -6784,11 +6960,17 @@ function CombatSkillService:Aim(targetRoot)
     if not camera then return nil end
     local old = camera.CFrame
     camera.CFrame = CFrame.lookAt(camera.CFrame.Position, targetRoot.Position)
-    pcall(function()
-        local vim = game:GetService("VirtualInputManager")
-        local size = camera.ViewportSize
-        vim:SendMouseMoveEvent(size.X * 0.5, size.Y * 0.5, game)
-    end)
+    local size = camera.ViewportSize
+    local moved = false
+    if IS_REAL and executorWindowActive() and type(mousemoveabs) == "function" then
+        moved = pcall(mousemoveabs, math.floor(size.X * 0.5), math.floor(size.Y * 0.5))
+    end
+    if not moved then
+        pcall(function()
+            local vim = game:GetService("VirtualInputManager")
+            vim:SendMouseMoveEvent(size.X * 0.5, size.Y * 0.5, game)
+        end)
+    end
     return {Camera = camera, CFrame = old}
 end
 function CombatSkillService:RestoreAim(record)
@@ -6964,26 +7146,45 @@ local function executorHttpGet(url)
         if ok and type(response) == "table" then
             local body = response.Body or response.body
             local code = tonumber(response.StatusCode or response.Status or response.status_code) or 200
+            local success = response.Success
+            if success == false then return nil, tostring(response.StatusMessage or ("HTTP " .. tostring(code))) end
             if code >= 200 and code < 300 and type(body) == "string" then return body end
             return nil, "HTTP " .. tostring(code)
-        elseif not ok then return nil, tostring(response) end
+        elseif ok and type(response) == "string" and response ~= "" then
+            -- Real returns an error string from request() instead of throwing.
+            Runtime.LastError = "HTTP request: " .. response
+        elseif not ok then
+            Runtime.LastError = "HTTP request: " .. tostring(response)
+        end
     end
-    local ok, body = pcall(game.HttpGet, game, url)
-    if ok and type(body) == "string" then return body end
-    return nil, tostring(body or "HTTP requests are unavailable in this executor")
+    local ok, body = pcall(game.HttpGet, game, url, false)
+    if ok and type(body) == "string" and body ~= "" then return body end
+    return nil, tostring(body or Runtime.LastError or "HTTP requests are unavailable in this executor")
 end
 
 ServerService = {Next = 0, Searching = false, Visited = {[game.JobId] = true}, LastOtherCount = 0, Friend = nil}
 function ServerService:QueueSelf()
-    local source = Env.__PUCKAFK_BLOXFRUITS_SELF_SOURCE
-    if type(source) ~= "string" or source == "" then return false, "self source is not available" end
     local queue
     if type(queue_on_teleport) == "function" then queue = queue_on_teleport
     elseif type(queueonteleport) == "function" then queue = queueonteleport
     elseif type(syn) == "table" and type(syn.queue_on_teleport) == "function" then queue = syn.queue_on_teleport end
     if not queue then return false, "queue-on-teleport is not supported by this executor" end
+
+    -- Direct executor builds cannot reliably read their own source text.  Prefer a
+    -- caller-provided loader string (ideal for loadstring(game:HttpGet(...)) loaders),
+    -- then fall back to a self-source string when one was explicitly supplied.
+    local loader = Env.__PUCKAFK_BLOXFRUITS_TELEPORT_LOADER or Env.__PUCKAFK_BLOXFRUITS_LOADER
+    if type(loader) == "string" and loader ~= "" then
+        local ok, err = pcall(queue, loader)
+        return ok, err
+    end
+
+    local source = Env.__PUCKAFK_BLOXFRUITS_SELF_SOURCE
+    if type(source) ~= "string" or source == "" then
+        return false, "no teleport loader/self source was provided"
+    end
     local quoted = string.format("%q", source)
-    local payload = "local s=" .. quoted .. "; local e=_G; if type(getgenv)=='function' then local ok,v=pcall(getgenv); if ok and type(v)=='table' then e=v end end; e.__PUCKAFK_BLOXFRUITS_SELF_SOURCE=s; local f,err=loadstring(s,'PuckAFK_BloxFruits'); if not f then error(err) end; f()"
+    local payload = "local s=" .. quoted .. "; local e=_G; if type(getgenv)=='function' then local ok,v=pcall(getgenv); if ok and type(v)=='table' then e=v end end; e.__PUCKAFK_BLOXFRUITS_SELF_SOURCE=s; local f,err=loadstring(s); if not f then error(err) end; return f()"
     local ok, err = pcall(queue, payload)
     return ok, err
 end
@@ -7542,7 +7743,8 @@ function PurchaseService:TravelStep(root)
         state("SHOP_TRAVEL", "Going to " .. tostring(teacherName) .. " · " .. math.floor(distance) .. " studs")
         Runtime.PurchaseStatus = "Travelling to " .. tostring(teacherName) .. " · " .. math.floor(distance) .. " studs"
         local prefix = isAbility and "AbilityTeacher:" or "StyleTeacher:"
-        Movement:GoTo("Shop", CFrame.new(goal + Vector3.new(0, 2, 3)), tolerance, true, prefix .. tostring(key) .. ":" .. tostring(self.TravelStage))
+        local shopGoal = Movement:ApproachCFrame(goal, root.Position, self.TravelStage == "Teacher" and 3 or 0, self.TravelStage == "Teacher" and 1 or 2) or CFrame.new(goal)
+        Movement:GoTo("Shop", shopGoal, tolerance, true, prefix .. tostring(key) .. ":" .. tostring(self.TravelStage))
         return true
     end
 
@@ -7956,9 +8158,16 @@ function Controller:EnsureQuest(q, origin)
     self.AbandonAttempts = 0
     local destination = QuestService:Position(q.Id, origin)
     if not destination then QuestService:Reject(q, "Quest NPC location unavailable"); return false end
+
+    -- Underwater City is physically around X=61k, but it is an interior region, not a
+    -- destination that should be traversed through open world space.  Route through the
+    -- game's entrance first, then re-resolve the live quest NPC on the next controller tick.
+    if RegionService and RegionService:TransitionFor(destination, origin, q.Id) then return false end
+
     if (destination - origin).Magnitude > 8 then
         state("TRAVEL_TO_QUEST", QuestService:NPCName(q.Id) or q.Id)
-        Movement:GoTo(Runtime.Owner, CFrame.new(destination + Vector3.new(0, 1, 3)), 4, true, "Quest:" .. q.Key)
+        local questGoal = Movement:ApproachCFrame(destination, origin, 3, 1) or CFrame.new(destination)
+        Movement:GoTo(Runtime.Owner, questGoal, 4, true, "Quest:" .. q.Key)
         return false
     end
     Movement:Cancel("At quest NPC")
@@ -8103,7 +8312,9 @@ function Controller:Step()
         local spawn = EnemyService:NearestSpawn(q.Target, r.Position)
         local waited = math.floor(os.clock() - self.NoTargetAt)
         state(owner == "Boss" and "WAIT_BOSS" or "WAIT_SPAWN", q.Target .. " · waiting " .. waited .. "s")
-        if spawn and (spawn - r.Position).Magnitude > 35 then
+        if spawn and RegionService and RegionService:TransitionFor(spawn, r.Position, q.Target .. " spawn") then
+            return
+        elseif spawn and (spawn - r.Position).Magnitude > 35 then
             Movement:GoTo(owner, CFrame.new(spawn + Vector3.new(0, 3, 0)), 10, true, "Spawn:" .. q.Target)
         elseif self.WaitAnchor then
             Movement:GoTo(owner, self.WaitAnchor, 3, true, "Hold")
@@ -8138,8 +8349,18 @@ function Controller:Step()
     Combat:Observe(Runtime.Target, targetHumanoid, entry)
 
     local weaponType = entry.Data and entry.Data.WeaponType or "Unknown"
-    local destination = Movement:Position(targetRoot, entry.Data)
-    if DodgeService then destination = DodgeService:Apply(destination, targetRoot) end
+    local okPosition, destination = pcall(Movement.Position, Movement, targetRoot, entry.Data)
+    if not okPosition or typeof(destination) ~= "CFrame" then
+        local reason = okPosition and "Movement position returned no CFrame" or tostring(destination)
+        Runtime.LastError = "Position: " .. reason
+        log("Error", Runtime.LastError)
+        local fallbackPoint = targetRoot.Position + Vector3.new(0, math.max(3, tonumber(Config.Distance) or 3), 0)
+        destination = CFrame.lookAt(fallbackPoint, targetRoot.Position)
+    end
+    if DodgeService then
+        local okDodge, adjusted = pcall(DodgeService.Apply, DodgeService, destination, targetRoot)
+        if okDodge and typeof(adjusted) == "CFrame" then destination = adjusted end
+    end
     Movement:GoTo(owner, destination, weaponType == "Gun" and 3 or 1.25, true, Runtime.Target)
 
     local distance = (r.Position - targetRoot.Position).Magnitude
@@ -8265,8 +8486,15 @@ local function refreshDropdown(control, key, options)
     if Config[key] and not table.find(options, Config[key]) then table.insert(options, Config[key]) end
     local signature = table.concat(options, "\0")
     if control._BFOptionsSignature ~= signature then
-        control._BFOptionsSignature = signature
-        control:Refresh(options)
+        -- UI refresh is non-critical and must NEVER send the farming controller into
+        -- Recovery. Real 2.5 can reject hidden-UI Instance access on deferred threads.
+        local ok, err = pcall(control.Refresh, control, options)
+        if ok then
+            control._BFOptionsSignature = signature
+        else
+            control._BFOptionsSignature = nil
+            log("UI", "Dropdown refresh skipped: " .. tostring(err))
+        end
     end
 end
 local function refreshChoices()
@@ -8297,7 +8525,7 @@ local function refreshChoices()
 end
 local function buildUI()
     assert(type(loadstring) == "function", "This environment cannot compile the bundled PuckUI (loadstring is missing)")
-    local compile, err = loadstring(BUNDLED_PUCKUI, "PuckUI_v3_8_0")
+    local compile, err = loadstring(BUNDLED_PUCKUI)
     assert(compile, err)
     UI = compile()
     assert(type(UI) == "table" and type(UI.CreateWindow) == "function", "PuckUI failed to initialize")
@@ -8450,7 +8678,7 @@ local function buildUI()
         stopAll()
         worker("Rejoin", function() TeleportService:Teleport(game.PlaceId, Player) end)
     end})
-    utility:CreateLabel("Sea detection and self-queue behavior are unchanged")
+    utility:CreateLabel("Auto-resume uses queue-on-teleport when your loader/self-source is available")
 
     -- SETTINGS -------------------------------------------------------------
     settings:CreateSection("Script")
@@ -8479,14 +8707,15 @@ function Runtime:DiagnosticText()
     local data = Player:FindFirstChild("Data")
     local names = {}; for key in pairs(self.Modules) do table.insert(names,key) end; table.sort(names)
     local lines = {
-        "PuckAFK Blox Fruits " .. VERSION, "Place: " .. tostring(game.PlaceId) .. " | Version: " .. tostring(game.PlaceVersion),
+        "PuckAFK Blox Fruits " .. VERSION, "Executor: " .. tostring(EXECUTOR_NAME) .. " " .. tostring(EXECUTOR_VERSION) .. (IS_REAL and " | Real mode: ON" or " | Real mode: OFF"), "Place: " .. tostring(game.PlaceId) .. " | Version: " .. tostring(game.PlaceVersion),
         "State: " .. self.State .. " | " .. self.Detail,
         "Sea: " .. tostring(self.Sea) .. " (" .. tostring(self.SeaSource) .. ") | Level: " .. tostring(value(data,"Level","?")),
         "Quest: " .. (self.Quest and (self.Quest.Key or self.Quest.Target) or "None"),
         "Target: " .. (self.Target and self.Target.Name or "None") .. " | HP: " .. (h and math.floor(h.Health) or "?"),
         "Distance: " .. (r and targetRoot and string.format("%.1f", (r.Position-targetRoot.Position).Magnitude) or "?") .. " | Weapon: " .. tostring(self.Weapon or "None"),
         "Combat: " .. tostring(self.CombatPath or "Idle") .. " | M1: " .. tostring(self.M1Status or "Waiting") .. " | Dodge: " .. tostring(self.DodgeStatus or "Watching"),
-        "Movement: " .. (Movement.Connection and Config.Movement or "Stopped") .. " | Owner: " .. tostring(self.Owner),
+        "Movement: " .. (Movement.Connection and Config.Movement or "Stopped") .. " | Owner: " .. tostring(self.Owner) .. " | Goal: " .. (Movement.Goal and string.format("%.1f, %.1f, %.1f", Movement.Goal.Position.X, Movement.Goal.Position.Y, Movement.Goal.Position.Z) or "None"),
+        "Region: " .. tostring(RegionService and RegionService.Status or "Unknown"),
         "Recovery: " .. self.LastRecovery, "Last error: " .. self.LastError,
         "Farm time: " .. math.floor(self.FarmSeconds) .. "s | Quest completions observed: " .. self.Counters.Quests,
         "Fruits collected: " .. tostring(self.Counters.FruitsCollected) .. " | Fruit pickup: " .. tostring(self.FruitPickupStatus),
@@ -8498,7 +8727,7 @@ function Runtime:DiagnosticText()
     for _, item in ipairs(self.Logs) do table.insert(lines, "[" .. item.Time .. "s] " .. item.Kind .. " " .. item.Message) end
     return table.concat(lines,"\n")
 end
-local okUI, errorUI = xpcall(buildUI, debug.traceback)
+local okUI, errorUI = xpcall(buildUI, TRACEBACK)
 if not okUI then log("Error", errorUI); Runtime:Shutdown("UI initialization failed"); warn("PuckAFK: " .. tostring(errorUI)); return end
 QuestService:SyncActive(true)
 for key, names in pairs({LiveQuests={"Quests"},Guide={"GuideModule"},GuideData={"GuideModule","GuideData"},Combat={"Controllers","CombatController"},CombatUtil={"Modules","CombatUtil"},Realm={"Util","Realm"}}) do loadModule(key,names) end
@@ -8506,7 +8735,7 @@ local antiAFKFailed = false
 connect(Player.Idled, function()
     if not Runtime.Running or not Config.AntiAFK or antiAFKFailed or UIS:GetFocusedTextBox() then return end
     local ok, err = pcall(function()
-        -- A single paired right-button pulse only when Roblox raises Idled.
+        -- Keep VirtualUser first because it also works while Roblox is not focused.
         local camera = workspace.CurrentCamera
         if not camera then return end
         local virtual = game:GetService("VirtualUser")
@@ -8514,6 +8743,9 @@ connect(Player.Idled, function()
         virtual:Button2Down(Vector2.zero, camera.CFrame)
         virtual:Button2Up(Vector2.zero, camera.CFrame)
     end)
+    if not ok and IS_REAL and executorWindowActive() and type(mouse2click) == "function" then
+        ok, err = pcall(mouse2click)
+    end
     if not ok then antiAFKFailed = true; log("Error", "Anti-AFK unavailable: " .. tostring(err)); notify("This executor could not run Anti-AFK") end
 end)
 connect(Player.CharacterRemoving, function()
@@ -8539,7 +8771,7 @@ local questEventBound = false
 local nextUI, nextChoices, lastTick, nextOptional, nextModuleRetry = 0, 0, os.clock(), 0, os.clock() + 5
 Runtime.Ready = true
 PrivacyService:Step(); ServerService.Next = 0; FruitShopService.Next = 0; FruitPickupService:Bind()
-notify("Loaded. Auto Level core is ready. Item-NPC / gear automation has been removed.")
+notify("Loaded on " .. tostring(EXECUTOR_NAME) .. ". " .. (IS_REAL and "Real compatibility mode is active." or "Generic executor mode is active."))
 Runtime.Loop = task.defer(function()
     while Runtime.Running do
         local now = os.clock()
@@ -8589,41 +8821,43 @@ Runtime.Loop = task.defer(function()
             end
             if now >= nextChoices then
                 nextChoices = now + 5
-                QuestService:Build(); refreshChoices()
+                QuestService:Build()
+                -- Choice-list/UI maintenance is deliberately isolated from the core
+                -- controller. A UI capability failure must not cancel combat/movement.
+                local choicesOK, choicesErr = pcall(refreshChoices)
+                if not choicesOK then log("UI", "Choice refresh skipped: " .. tostring(choicesErr)) end
             end
             if now >= nextUI then
                 nextUI = now + 0.5
-                local data = Player:FindFirstChild("Data")
-                local sea = Runtime.Sea or "Detecting"
-                Runtime.StatusLabel:Set({Title = Runtime.State:gsub("_", " "), Content = Runtime.Detail .. "\n" .. sea .. " · Level " .. tostring(value(data,"Level","?")) .. " · " .. math.floor(Runtime.FarmSeconds/60) .. "m farming\nQuest: " .. (Runtime.Quest and (Runtime.Quest.Name or Runtime.Quest.Target) or "None") .. "\nWeapon: " .. tostring(Runtime.Weapon or "None")})
-                Runtime.FarmLabel:Set(Runtime.Detail)
-                if Runtime.ServerLabel then Runtime.ServerLabel:Set({Title = "Population", Content = Runtime.ServerStatus}) end
-                if Runtime.GachaLabel then Runtime.GachaLabel:Set({Title = "Zioles", Content = Runtime.GachaStatus .. "\nBeli: $" .. tostring(beli())}) end
-                if Runtime.FruitShopLabel then Runtime.FruitShopLabel:Set({Title = "Fruit dealer", Content = Runtime.FruitShopStatus}) end
-                if Runtime.FruitPickupLabel then Runtime.FruitPickupLabel:Set({Title = "Map fruit", Content = Runtime.FruitPickupStatus .. "\nCollected this session: " .. tostring(Runtime.Counters.FruitsCollected)}) end
-                if Runtime.PurchaseLabel then Runtime.PurchaseLabel:Set({Title = "Purchases", Content = Runtime.PurchaseStatus}) end
-                local targetClaim = Runtime.Target and (EnemyService:IsOurs(Runtime.Target) and "Ours" or EnemyService:IsContested(Runtime.Target) and "Contested" or "Free") or "None"
-                Runtime.DiagnosticsLabel:Set({Title = "Runtime", Content = "State: " .. Runtime.State .. "\nSea: " .. sea .. "\nTarget: " .. (Runtime.Target and Runtime.Target.Name or "None") .. " · " .. targetClaim .. "\nCombat: " .. tostring(Runtime.CombatPath or "Idle") .. "\nM1: " .. tostring(Runtime.M1Status or "Waiting") .. "\nCamera: " .. tostring(Runtime.CameraStatus or "Idle") .. "\nDodge: " .. tostring(Runtime.DodgeStatus or "Watching") .. "\nPosition: " .. tostring(Runtime.PositionStatus or Config.Position) .. "\nMovement: " .. (Movement.Connection and (Movement.EffectiveMode or Config.Movement) or "Stopped") .. "\nFruit: " .. Runtime.FruitPickupStatus .. "\nServer: " .. Runtime.ServerStatus .. "\nRecovery: " .. Runtime.LastRecovery .. "\nError: " .. Runtime.LastError})
+                -- Runtime UI is observational only. Never allow a Real executor UI
+                -- capability error to interrupt Controller:Step/combat/movement.
+                local uiOK, uiErr = pcall(function()
+                    local data = Player:FindFirstChild("Data")
+                    local sea = Runtime.Sea or "Detecting"
+                    Runtime.StatusLabel:Set({Title = Runtime.State:gsub("_", " "), Content = Runtime.Detail .. "\n" .. sea .. " · Level " .. tostring(value(data,"Level","?")) .. " · " .. math.floor(Runtime.FarmSeconds/60) .. "m farming\nQuest: " .. (Runtime.Quest and (Runtime.Quest.Name or Runtime.Quest.Target) or "None") .. "\nWeapon: " .. tostring(Runtime.Weapon or "None")})
+                    Runtime.FarmLabel:Set(Runtime.Detail)
+                    if Runtime.ServerLabel then Runtime.ServerLabel:Set({Title = "Population", Content = Runtime.ServerStatus}) end
+                    if Runtime.GachaLabel then Runtime.GachaLabel:Set({Title = "Zioles", Content = Runtime.GachaStatus .. "\nBeli: $" .. tostring(beli())}) end
+                    if Runtime.FruitShopLabel then Runtime.FruitShopLabel:Set({Title = "Fruit dealer", Content = Runtime.FruitShopStatus}) end
+                    if Runtime.FruitPickupLabel then Runtime.FruitPickupLabel:Set({Title = "Map fruit", Content = Runtime.FruitPickupStatus .. "\nCollected this session: " .. tostring(Runtime.Counters.FruitsCollected)}) end
+                    if Runtime.PurchaseLabel then Runtime.PurchaseLabel:Set({Title = "Purchases", Content = Runtime.PurchaseStatus}) end
+                    local targetClaim = Runtime.Target and (EnemyService:IsOurs(Runtime.Target) and "Ours" or EnemyService:IsContested(Runtime.Target) and "Contested" or "Free") or "None"
+                    Runtime.DiagnosticsLabel:Set({Title = "Runtime", Content = "State: " .. Runtime.State .. "\nSea: " .. sea .. "\nTarget: " .. (Runtime.Target and Runtime.Target.Name or "None") .. " · " .. targetClaim .. "\nCombat: " .. tostring(Runtime.CombatPath or "Idle") .. "\nM1: " .. tostring(Runtime.M1Status or "Waiting") .. "\nCamera: " .. tostring(Runtime.CameraStatus or "Idle") .. "\nDodge: " .. tostring(Runtime.DodgeStatus or "Watching") .. "\nPosition: " .. tostring(Runtime.PositionStatus or Config.Position) .. "\nMovement: " .. (Movement.Connection and (Movement.EffectiveMode or Config.Movement) or "Stopped") .. "\nRegion: " .. tostring(RegionService and RegionService.Status or "Unknown") .. "\nFruit: " .. Runtime.FruitPickupStatus .. "\nServer: " .. Runtime.ServerStatus .. "\nRecovery: " .. Runtime.LastRecovery .. "\nError: " .. Runtime.LastError})
+                end)
+                if not uiOK then log("UI", "Runtime UI update skipped: " .. tostring(uiErr)) end
             end
             -- Same scheduler owns the watchdog; no competing recovery loop.
             if Runtime.State == "EQUIP_WEAPON" and now - Runtime.StateSince > 15 then Controller:Recover("Weapon never finished equipping", false) end
-        end, debug.traceback)
+        end, TRACEBACK)
         if not success then
-            log("Error", err); Controller:Recover("Controller error; inspect Diagnostics", false)
+            local fullError = tostring(err)
+            local shortError = fullError:match("^[^\n]+") or fullError
+            if #shortError > 120 then shortError = shortError:sub(1, 117) .. "..." end
+            log("Error", fullError)
+            Controller:Recover("Controller: " .. shortError, false)
         end
         task.wait(selectedOwner() and 0.2 or 0.5)
     end
 end)
 return Runtime
 
-]========]
-local __PUCK_ENV = _G
-if type(getgenv) == "function" then
-    local ok, env = pcall(getgenv)
-    if ok and type(env) == "table" then __PUCK_ENV = env end
-end
-__PUCK_ENV.__PUCKAFK_BLOXFRUITS_SELF_SOURCE = __PUCK_SOURCE
-assert(type(loadstring) == "function", "PuckAFK Blox Fruits requires loadstring")
-local __PUCK_RUN, __PUCK_ERR = loadstring(__PUCK_SOURCE, "PuckAFK_BloxFruits_v1.6.8")
-if not __PUCK_RUN then error(__PUCK_ERR) end
-return __PUCK_RUN()
