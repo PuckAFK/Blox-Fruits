@@ -1,4 +1,4 @@
--- PuckAFK Blox Fruits v1.6.13 | Real Executor targeted compatibility + Sea 1 region portal routing.
+-- PuckAFK Blox Fruits v1.6.25 | Real Executor targeted compatibility + verified Sea 1 / Sea 2 region routing.
 -- v1.6.13 fixes Auto Level trying to physically cross ~60,000 studs to Underwater City.
 -- Fishman/Underwater City uses Blox Fruits' requestEntrance transition; leaving it uses the return entrance before normal movement resumes.
 -- Flattened bootstrap: executes directly instead of compiling the whole script from a giant self-source string.
@@ -11,8 +11,19 @@
 -- PuckUI v3.8.0 is bundled below with service-input connection cleanup. See accompanying inspection report.
 -- v1.6.7 removes the unreliable item-NPC / gear automation completely. Core farming, combat, movement, fruits, weapons, styles and Haki remain.
 -- v1.6.8 makes Auto Dodge physically displace the character with a short dedicated lateral burst instead of only retargeting the normal combat follow.
-local VERSION = "1.6.14"
+local VERSION = "1.6.25"
 -- v1.6.14: Real 2.5 UI capability fix; PlayerGui-first PuckUI + protected runtime dropdown refresh.
+-- v1.6.16: global water safety; smooth routes, combat follow and dodge stay above damaging ocean water.
+-- v1.6.17: alternating hybrid mastery; strongest non-fruit full kill, then Blox Fruit last-hit target, with optional melee/kick primary.
+-- v1.6.18: Cobalt-log grounded remote/event pass: server-acknowledged M1 chains, QuestUpdate progress tracking,
+-- verified Sea 1 checkpoint calls, lower CommF_ contention, and Black Leg vector-aim reinforcement during real skill input.
+-- v1.6.20: Auto Level regression fix. Restores v1.6.18's known-working farm/combat decision path.
+-- Second Cobalt capture additions are passive diagnostics or last-resort skill fallbacks only; they never gate movement, quests, M1, or recovery.
+-- v1.6.21: predictive water avoidance; footprint + look-ahead scans climb before shorelines and guard pre/post physics.
+-- v1.6.22: ground-fruit ESP + selectable Tween/Teleport pickup; player-held/backpack fruits are hard-rejected as movement targets.
+-- v1.6.23: Auto Level now owns the Level 700 First Sea -> Second Sea progression: Detective, Key/Ice Door, Ice Admiral, then TravelDressrosa.
+-- v1.6.24: Ice Door surface/contact fix; approaches the live collidable face instead of its unreachable centre and explicitly pulses the equipped Key against it.
+-- v1.6.25: Second Sea dump pass: live/static quest NPC + enemy spawn routing, Cursed Ship requestEntrance shortcut, and verified Sea 2 checkpoints.
 
 -- Executor compatibility: some sandboxes expose a reduced `debug` table.
 -- xpcall only needs an error formatter, so never hard-depend on debug.traceback.
@@ -92,6 +103,14 @@ local Runtime = {
     Counters = {Targets = 0, Quests = 0, Recoveries = 0, FruitRolls = 0, FruitsCollected = 0, Purchases = 0, ServerHops = 0}, Modules = {},
     ServerStatus = "Idle", GachaStatus = "Idle", FruitShopStatus = "Not checked", FruitPickupStatus = "Idle", PurchaseStatus = "Idle",
     CombatHitPart = "None", CombatPath = "Idle", M1Status = "Waiting", CameraStatus = "Idle", DodgeStatus = "Watching",
+    WaterSafetyStatus = "Armed · scanning for water",
+    SeaProgressStatus = "Waiting for Level 700 progression",
+    HybridMasteryStatus = "Off",
+    AttackAckAvailable = false, AttackAckAt = 0, AttackAckCombo = 0, AttackAckWeapon = "None", AttackAckWindow = 0,
+    DamageAckAvailable = false, DamageAckAt = 0, DamageAckValue = 0, DamageAckCount = 0,
+    SkillRemoteStatus = "Native key input preferred",
+    QuestProgressStatus = "Waiting for QuestUpdate", QuestProgressKey = nil, QuestProgressValue = 0,
+    CheckpointStatus = "Automatic verified checkpointing armed",
     ExecutorName = EXECUTOR_NAME, ExecutorVersion = EXECUTOR_VERSION, RealExecutor = IS_REAL,
 }
 Env[KEY] = Runtime
@@ -102,11 +121,17 @@ local Config = {
     Height = 0, Side = 0, AboveLookDown = true, AboveLookDownAngle = 45,
     OrbitRadius = 4, OrbitSpeed = 35,
     Movement = "Smooth", Speed = 100, NoCollision = true,
+    AvoidWater = true, WaterClearance = 22, AutoCheckpoint = true, AutoSeaProgression = true,
     AttackInterval = 0.22, CameraAim = true, AutoAura = false, AutoDodge = true,
     AutoSkills = true, SkillZ = true, SkillX = true, SkillC = true, SkillV = true, SkillF = false,
     SkillAim = true, SkillHold = 0.12, SkillMaxRange = 55,
     AvoidContested = true, ContestedSeconds = 5,
     Mastery = false, MasteryWeapon = "Select weapon", FinishPercent = 25,
+    HybridMastery = false,
+    HybridPrimary = "Strongest non-fruit",
+    HybridMeleeWeapon = "Auto melee / kick style",
+    HybridFruitWeapon = "Auto fruit",
+    HybridFruitFinishPercent = 45,
     AutoStats = false, StatMelee = false, StatDefense = false, StatSword = false,
     StatGun = false, StatFruit = false, StatBatch = 1, StatDistribution = "Lowest stat",
     AntiAFK = true,
@@ -114,6 +139,7 @@ local Config = {
     HideOwnNameplate = false, HidePlayerList = false,
     AutoRandomFruit = false, FruitMoneyReserve = 0,
     AutoCollectSpawnedFruits = true, AutoStoreSpawnedFruits = true,
+    GroundFruitESP = true, SpawnedFruitTravel = "Tween",
     FruitDealer = "Normal", StockFruit = "Select fruit", DragonType = "East", AutoBuyStockFruit = false,
     ShopWeapon = "Katana", AutoBuyWeapon = false,
     FightingStyle = "Dark Step", AutoBuyStyle = false,
@@ -121,7 +147,7 @@ local Config = {
     Debug = false,
 }
 Runtime.Config = Config
-local Movement, Combat, QuestService, EnemyService, UI, PrivacyService, ServerService, FruitGachaService, FruitShopService, FruitPickupService, CombatSkillService, PurchaseService, DodgeService, RegionService
+local Movement, Combat, QuestService, EnemyService, UI, PrivacyService, ServerService, FruitGachaService, FruitShopService, FruitPickupService, CombatSkillService, PurchaseService, DodgeService, RegionService, SeaProgressionService
 local function log(kind, message)
     message = tostring(message)
     if kind == "Error" then Runtime.LastError = message end
@@ -194,6 +220,7 @@ local function notify(message)
     if UI then UI:Notify({Title = "PuckAFK · Blox Fruits", Content = message, Duration = 4}) end
 end
 local function selectedOwner()
+    if FruitShopService and FruitShopService.HasTravelWork and FruitShopService:HasTravelWork() then return "Shop" end
     if PurchaseService and PurchaseService:HasTravelWork() then return "Shop" end
     if Config.AutoBoss then return "Boss" end
     if Config.AutoEnemy then return "Enemy" end
@@ -235,6 +262,236 @@ local GameData = {["npcNames"]={["Cupid_ValentineDailyQuests"]="Cupid Valentine 
 
 -- Exact quest database extracted from the supplied 2026-09-05 Blox Fruits dump.
 -- This removes Auto Level's dependency on requiring ReplicatedStorage.Quests at runtime.
+-- Exact Second Sea navigation data extracted from the supplied place 4442272183 dump.
+-- Live replicated NPC/spawn objects are preferred; these tables are deterministic fallbacks
+-- for streaming gaps and for Real Executor sessions that join before the map fully replicates.
+GameData.sea2NPCPositions = {
+    ["Area1Quest"] = {
+        {-429.544006, 71.770004, 1836.182007},
+    },
+    ["Area2Quest"] = {
+        {638.445007, 71.770004, 918.236023},
+    },
+    ["MarineQuest3"] = {
+        {-2440.795898, 71.714005, -3216.068115},
+    },
+    ["ZombieQuest"] = {
+        {-5497.062012, 47.591995, -795.237},
+    },
+    ["SnowMountainQuest"] = {
+        {609.859009, 400.119995, -5372.258789},
+    },
+    ["IceSideQuest"] = {
+        {-6231.271973, 80.933769, -4851.320801},
+    },
+    ["FireSideQuest"] = {
+        {-5403.368164, 28.277618, -5371.700195},
+    },
+    ["ShipQuest1"] = {
+        {1040.55542, 124.943008, 32909.105469},
+    },
+    ["ShipQuest2"] = {
+        {974.075928, 124.938667, 33253.621094},
+    },
+    ["FrostQuest"] = {
+        {5667.658203, 26.800003, -6486.089844},
+    },
+    ["ForgottenQuest"] = {
+        {-3054.445068, 238.343994, -10142.819336},
+    },
+}
+GameData.sea2Spawns = {
+    ["Raider"] = {
+        {475.562988, 40.007996, 2433.435059},
+        {-612.437012, 40.007996, 2557.435059},
+        {-904.336975, 40.007996, 2501.435059},
+        {-917.437012, 40.007996, 2250.435059},
+        {265.562988, 40.007996, 2497.435059},
+        {241.563004, 40.007996, 2195.435059},
+        {-607.437012, 40.007996, 2202.435059},
+        {549.562988, 40.007996, 2190.435059},
+    },
+    ["Mercenary"] = {
+        {-913.765015, 72.876007, 1574.151001},
+        {-1209.204956, 72.876007, 1073.036987},
+        {-1135.94397, 72.876007, 1248.327026},
+        {-924.684021, 72.876007, 1788.124023},
+        {-1085.151001, 72.876007, 1696.394043},
+        {-986.775024, 72.876007, 1088.447021},
+    },
+    ["Diamond"] = {
+        {-1711.370972, 206.041, -97.082001},
+    },
+    ["Swan Pirate"] = {
+        {984.630005, 72.807999, 1401.682983},
+        {823.612, 72.807999, 1162.220947},
+        {967.174011, 72.968002, 1180.755981},
+        {827.799988, 72.807999, 1326.896973},
+        {1066.994019, 72.807999, 1080.917969},
+        {1063.188965, 72.807999, 1399.762939},
+    },
+    ["Factory Staff"] = {
+        {692.109985, 72.807999, 227.751999},
+        {936.109985, 72.807999, -71.248001},
+        {-426.890015, 72.807999, -367.247986},
+        {386.109985, 72.807999, 91.751999},
+        {-105.889999, 72.807999, -670.247986},
+        {-93.889999, 72.807999, -34.227997},
+    },
+    ["Jeremy"] = {
+        {2338.001953, 451.425995, 700.106995},
+    },
+    ["Marine Lieutenant"] = {
+        {-3012.852051, 71.014008, -2921.832031},
+        {-2583.945068, 71.014008, -3039.61792},
+        {-2932.5, 71.014008, -2604.095947},
+        {-2766.070068, 71.014008, -3144.749023},
+        {-3258.550049, 71.014008, -2990.866943},
+    },
+    ["Marine Captain"] = {
+        {-1805.364014, 73.014008, -3313.324951},
+        {-1601.317017, 73.014008, -3315.324951},
+        {-2030.248047, 73.014008, -3477.63501},
+        {-2103.934082, 73.014008, -3259.302979},
+        {-1928.389038, 73.014008, -3119.580078},
+    },
+    ["Orbitus"] = {
+        {-2138.483887, 75.94101, -4326.455078},
+    },
+    ["Zombie"] = {
+        {-5512.231934, 49.307999, -847.978027},
+        {-5595.600098, 49.307999, -524.247986},
+        {-5761.992188, 49.307999, -654.937988},
+        {-5766.648926, 47.501007, -824.661987},
+        {-5614.959961, 49.307999, -938.468994},
+        {-5856.588867, 70.350998, -739.049988},
+    },
+    ["Vampire"] = {
+        {-6039.688965, 9.007996, -1099.159058},
+        {-5952.995117, 9.007996, -1568.529053},
+        {-6277.26416, 9.007996, -1269.448975},
+        {-5776.551758, 9.007996, -1373.449951},
+        {-6132.39502, 9.007996, -1466.168945},
+    },
+    ["Snow Trooper"] = {
+        {642.666016, 400.808014, -5454.48877},
+        {716.627014, 400.808014, -5706.440918},
+        {572.692993, 400.808014, -5605.207031},
+        {392.218994, 400.808014, -5207.685059},
+        {430.402008, 400.808014, -5069.095215},
+        {445.944, 442.808014, -5553.905762},
+        {484.345001, 400.808014, -5472.416016},
+    },
+    ["Winter Warrior"] = {
+        {1205.458984, 428.808014, -5397.358887},
+        {1043.305054, 428.808014, -5049.786133},
+        {1142.437988, 428.808014, -5043.053223},
+        {1226.30896, 428.808014, -5215.976074},
+        {1446.27002, 428.808014, -5369.214844},
+        {1371.870972, 428.808014, -5194.703125},
+    },
+    ["Lab Subordinate"] = {
+        {-5623.333008, 81.699837, -4444.160645},
+        {-5693.312988, 81.699837, -4628.295898},
+        {-5897.821777, 81.699837, -4554.624023},
+        {-5998.328125, 90.025246, -4386.522461},
+        {-5766.353027, 81.699837, -4249.669922},
+    },
+    ["Horned Warrior"] = {
+        {-6421.203125, 29.228615, -5591.427734},
+        {-6445.955078, 31.009565, -5858.288086},
+        {-6133.451172, 29.228615, -6049.024414},
+        {-6182.009766, 29.228615, -5914.246094},
+        {-6331.765137, 29.228615, -5778.941895},
+        {-6539.964355, 29.228615, -5717.98291},
+    },
+    ["Smoke Admiral"] = {
+        {-4857.358398, 233.677841, -5583.243164},
+    },
+    ["Magma Ninja"] = {
+        {-5657.261719, 34.204071, -5551.613281},
+        {-5711.411133, 47.401497, -5658.523438},
+        {-5790.075684, 28.915442, -5393.24707},
+        {-5811.147949, 30.047733, -5576.536621},
+        {-5885.368652, 32.641621, -5501.197266},
+        {-5845.98584, 50.262756, -5670.969727},
+    },
+    ["Lava Pirate"] = {
+        {-5082.350098, 28.90506, -4796.317383},
+        {-5218.38916, 29.775669, -4999.949219},
+        {-5005.393555, 28.487869, -5025.076172},
+        {-5111.282715, 32.17173, -5115.875},
+        {-5005.521484, 28.023432, -4916.077148},
+    },
+    ["Ship Deckhand"] = {
+        {1176.29895, 125.577011, 33119.109375},
+        {580.299011, 125.577011, 32930.109375},
+        {1157.29895, 125.577011, 32930.109375},
+        {1259.29895, 125.577011, 33032.109375},
+        {719.299011, 125.577011, 33032.109375},
+        {580.299011, 125.577011, 33124.25},
+        {1247.29895, 125.577011, 33218.109375},
+    },
+    ["Ship Engineer"] = {
+        {815.629028, 43.693008, 33111.339844},
+        {729.22998, 43.693008, 32950.34375},
+        {834.796997, 43.693008, 32720.925781},
+        {1025.656982, 43.693008, 32740.855469},
+        {1088.251953, 43.693008, 32890.09375},
+        {1016.778015, 43.693008, 33074.132812},
+    },
+    ["Ship Steward"] = {
+        {918.666992, 125.834, 33506.503906},
+        {801.382996, 125.834, 33505.179688},
+        {815.000977, 125.834, 33376.203125},
+        {1032.458008, 125.834, 33512.394531},
+        {986.882996, 125.834, 33366.953125},
+    },
+    ["Ship Officer"] = {
+        {1320.529053, 179.906006, 33294.601562},
+        {1162.529053, 179.906006, 33445.601562},
+        {694.528992, 179.906006, 33112.632812},
+        {505.528992, 179.906006, 33263.632812},
+        {657.528992, 179.906006, 33460.632812},
+        {1144.529053, 179.906006, 33112.601562},
+    },
+    ["Arctic Warrior"] = {
+        {6095.525879, 27.559998, -6077.940918},
+        {6271.316895, 27.559998, -6151.538086},
+        {6167.222168, 27.559998, -6319.22998},
+        {5832.195801, 27.559998, -6241.290039},
+        {5994.588867, 27.559998, -6324.278809},
+    },
+    ["Snow Lurker"] = {
+        {5443.421875, 27.559998, -7031.285156},
+        {5567.856934, 27.559998, -6900.464844},
+        {5484.417969, 27.559998, -6733.75},
+        {5763.846191, 27.559998, -6671.045898},
+        {5524.157227, 27.559998, -6583.820801},
+    },
+    ["Awakened Ice Admiral"] = {
+        {6551.793945, 325.295013, -6989.898926},
+    },
+    ["Sea Soldier"] = {
+        {-3499.3479, 16.085999, -9712.005859},
+        {-3293.050049, 5.908997, -9640.931641},
+        {-2550.922119, 28.453003, -9839.99707},
+        {-3240.331055, 27.453003, -9813.96582},
+        {-2840.092041, 27.453003, -9814.380859},
+        {-3459.691895, 25.628998, -9934.772461},
+    },
+    ["Water Fighter"] = {
+        {-3511.958984, 239.138, -10346.928711},
+        {-3657.949951, 239.138, -10591.147461},
+        {-3331.705078, 239.138, -10553.356445},
+        {-3396.358887, 239.138, -10745.105469},
+        {-3316.753906, 239.138, -10323.168945},
+    },
+    ["Tide Keeper"] = {
+        {-3760.416016, 78.337997, -11585.704102},
+    },
+}
+
 local BUNDLED_QUESTS = {
 	BanditQuest1 = {
 		{
@@ -5602,50 +5859,298 @@ function RemoteService:Call(label, cooldown, args, callback, options)
     return true
 end
 
--- Sea 1 contains interior regions that are physically stored tens of thousands of studs
--- away from the main ocean.  Smooth movement must NEVER try to cross that raw gap.
--- The game exposes requestEntrance specifically for these transitions.
+-- The supplied Cobalt session captured the current native melee handshake:
+-- WeaponToolClient sends Modules.Net["RE/RegisterAttack"], then the server replies with
+-- Modules.Net["RE/PlayAttackStartEffect"](character, equippedWeapon, comboIndex).
+-- We only OBSERVE the server reply. Damage still goes through Blox Fruits' own
+-- CombatController/CombatUtil/Input path; no obfuscated hit remote payload is guessed.
+local CombatRemoteObserver = {Bound = false, Event = nil}
+function CombatRemoteObserver:Bind()
+    if self.Bound then return true end
+    local event = path(RS, "Modules", "Net", "RE/PlayAttackStartEffect")
+    if not event or not event:IsA("RemoteEvent") then return false end
+    self.Event, self.Bound = event, true
+    Runtime.AttackAckAvailable = true
+    connect(event.OnClientEvent, function(actor, equippedWeapon, comboIndex)
+        local character = Player and Player.Character
+        if not character or actor ~= character then return end
+        local now = os.clock()
+        Runtime.AttackAckAt = now
+        Runtime.AttackAckCombo = tonumber(comboIndex) or 0
+        Runtime.AttackAckWindow = Runtime.AttackAckCombo == 4 and 0.9 or 0.4
+        Runtime.AttackAckWeapon = equippedWeapon and tostring(equippedWeapon.Name) or "EquippedWeapon"
+        if Combat then
+            Combat.LastAckAt = now
+            Combat.LastAckCombo = Runtime.AttackAckCombo
+            Combat.AckSequence = (Combat.AckSequence or 0) + 1
+            Combat.PendingAckSince = 0
+            Combat.InputRetry = false
+            Runtime.M1Status = "Server accepted M1 · combo " .. tostring(Runtime.AttackAckCombo)
+        end
+    end)
+    return true
+end
+
+-- Passive observer from the second Cobalt capture. Remotes.Combo often carries a damage
+-- number after a local CombatUtil hit. This is diagnostics ONLY in v1.6.20: it must not
+-- influence Auto Level's progress/recovery clocks because unrelated nearby combat can
+-- produce the same event.
+local DamageRemoteObserver = {Bound = false, Event = nil}
+function DamageRemoteObserver:Bind()
+    if self.Bound then return true end
+    local event = path(RS, "Remotes", "Combo")
+    if not event or not event:IsA("RemoteEvent") then return false end
+    self.Event, self.Bound = event, true
+    Runtime.DamageAckAvailable = true
+    connect(event.OnClientEvent, function(value)
+        local amount = tonumber(value)
+        if not amount or amount <= 0 or not Combat then return end
+        local now = os.clock()
+        local recentM1 = now - (Combat.LastM1Attack or 0) <= 2.5
+        local recentSkill = CombatSkillService and now - (CombatSkillService.LastCastAt or 0) <= 3.5
+        if not recentM1 and not recentSkill then return end
+        Runtime.DamageAckAt = now
+        Runtime.DamageAckValue = amount
+        Runtime.DamageAckCount = (Runtime.DamageAckCount or 0) + 1
+    end)
+    return true
+end
+
+-- Sea 1 Underwater City and Sea 2 Cursed Ship are interior regions stored far away
+-- from their exterior maps. Never smooth-tween across those raw gaps: use the same
+-- requestEntrance transition exposed by the game's client, then resume normal movement.
 local SEA1_UNDERWATER_ENTRANCE = Vector3.new(61163.8515625, 11.6796875, 1819.7841796875)
 local SEA1_MAIN_RETURN_ENTRANCE = Vector3.new(3864.8515625, 6.6796875, -1926.7841796875)
-RegionService = {Next = 0, PendingUntil = 0, Status = "Main world", LastRequested = nil}
+local SEA2_CURSED_SHIP_INTERIOR_ENTRANCE = Vector3.new(923.2130126953125, 126.97599792480469, 32852.83203125)
+local SEA2_CURSED_SHIP_MAIN_RETURN = Vector3.new(-6508.55810546875, 89.03500366210938, -132.83999633789062)
+local SEA1_CHECKPOINT_BY_QUEST = {
+    SnowQuest = "Ice",
+    SkyQuest = "Sky",
+    SkyExp1Quest = "Sky",
+    SkyExp2Quest = "Sky2",
+    FishmanQuest = "Fishman",
+}
+local SEA2_CHECKPOINT_BY_QUEST = {
+    Area1Quest = "DressTown",
+    Area2Quest = "DressTown",
+    MarineQuest3 = "Greenb",
+    ZombieQuest = "Graveyard",
+    SnowMountainQuest = "Snowy",
+    IceSideQuest = "CircleIslandIce",
+    FireSideQuest = "CircleIslandFire",
+    ShipQuest1 = "Ship",
+    ShipQuest2 = "Ship",
+    FrostQuest = "IceCastle",
+    ForgottenQuest = "ForgottenIsland",
+}
+RegionService = {
+    Next = 0, PendingUntil = 0, Status = "Main world", LastRequested = nil,
+    DesiredUnderwater = nil, DesiredCursedShip = nil,
+    CheckpointNext = 0, LastCheckpoint = nil, LastCheckpointAt = 0,
+}
 function RegionService:IsUnderwater(position)
     return typeof(position) == "Vector3" and position.X > 30000
 end
-function RegionService:TransitionFor(destination, origin, reason)
-    if Runtime.Sea ~= "Sea1" or typeof(destination) ~= "Vector3" or typeof(origin) ~= "Vector3" then return false end
-    local destinationUnderwater = self:IsUnderwater(destination)
-    local currentUnderwater = self:IsUnderwater(origin)
-    if destinationUnderwater == currentUnderwater then
-        self.Status = destinationUnderwater and "Underwater City" or "Main world"
+function RegionService:IsCursedShip(position)
+    return typeof(position) == "Vector3" and position.Z > 25000
+end
+function RegionService:GhostShipEntrance(entering)
+    local map = workspace:FindFirstChild("Map")
+    local holder = map and map:FindFirstChild(entering and "GhostShipInterior" or "GhostShip")
+    local spawn = holder and holder:FindFirstChild("TeleportSpawn")
+    local live = pos(spawn)
+    if typeof(live) == "Vector3" then return live end
+    return entering and SEA2_CURSED_SHIP_INTERIOR_ENTRANCE or SEA2_CURSED_SHIP_MAIN_RETURN
+end
+function RegionService:Step()
+    local _, _, root = char()
+    if not root then return end
+
+    if Runtime.Sea == "Sea1" then
+        local hereUnderwater = self:IsUnderwater(root.Position)
+        if self.DesiredUnderwater ~= nil and hereUnderwater == self.DesiredUnderwater then
+            self.PendingUntil = 0
+            self.DesiredUnderwater = nil
+            self.Status = hereUnderwater and "Underwater City · entrance confirmed" or "Main world · return confirmed"
+            Runtime.ProgressAt = os.clock()
+        elseif self.DesiredUnderwater == nil then
+            self.Status = hereUnderwater and "Underwater City" or "Main world"
+        end
+        return
+    end
+
+    if Runtime.Sea == "Sea2" then
+        local hereShip = self:IsCursedShip(root.Position)
+        if self.DesiredCursedShip ~= nil and hereShip == self.DesiredCursedShip then
+            self.PendingUntil = 0
+            self.DesiredCursedShip = nil
+            self.Status = hereShip and "Cursed Ship interior · entrance confirmed" or "Second Sea main world · return confirmed"
+            Runtime.ProgressAt = os.clock()
+        elseif self.DesiredCursedShip == nil then
+            self.Status = hereShip and "Cursed Ship interior" or "Second Sea main world"
+        end
+        return
+    end
+
+    self.Status = "Main world"
+end
+function RegionService:CheckpointForQuest(questId, origin)
+    if Config.AutoCheckpoint ~= true or typeof(origin) ~= "Vector3" then return false end
+    local checkpoint
+
+    if Runtime.Sea == "Sea1" then
+        checkpoint = SEA1_CHECKPOINT_BY_QUEST[questId]
+        if not checkpoint then return false end
+
+        -- Exact Sea 1 names observed in the supplied Cobalt session.
+        if checkpoint == "Fishman" and not self:IsUnderwater(origin) then return false end
+        if checkpoint == "Sky2" and origin.Y < 5000 then return false end
+        if checkpoint == "Sky" and origin.Y < 200 then return false end
+        if checkpoint == "Ice" and (origin.X < 700 or origin.X > 1900 or origin.Y < 45 or origin.Y > 220) then return false end
+    elseif Runtime.Sea == "Sea2" then
+        checkpoint = SEA2_CHECKPOINT_BY_QUEST[questId]
+        if not checkpoint then return false end
+
+        -- These are the actual _WorldOrigin/PlayerSpawns names in the supplied Second Sea dump.
+        -- Never claim a remote checkpoint from across the map: require the character to be
+        -- close to that quest island, and require the real Cursed Ship interior for Ship.
+        local anchors = GameData.sea2NPCPositions and GameData.sea2NPCPositions[questId]
+        local nearest
+        for _, a in ipairs(anchors or {}) do
+            local p = vec(a)
+            local d = (p - origin).Magnitude
+            if not nearest or d < nearest then nearest = d end
+        end
+        if not nearest or nearest > 1800 then return false end
+        if checkpoint == "Ship" and not self:IsCursedShip(origin) then return false end
+    else
         return false
     end
 
-    if Movement then Movement:Cancel("Sea 1 region transition") end
-    local entering = destinationUnderwater and not currentUnderwater
-    local label = entering and "Entering Underwater City" or "Leaving Underwater City"
-    self.Status = label
-    state("REGION_TRAVEL", label .. (reason and (" · " .. tostring(reason)) or ""))
+    -- If the live Data value already agrees, avoid spending a CommF_ slot entirely.
+    local data = Player and Player:FindFirstChild("Data")
+    if value(data, "LastSpawnPoint", nil) == checkpoint then
+        self.LastCheckpoint = checkpoint
+        self.LastCheckpointAt = os.clock()
+        Runtime.CheckpointStatus = checkpoint .. " checkpoint already active"
+        return false
+    end
 
     local now = os.clock()
-    if now < (self.PendingUntil or 0) then return true end
-    if now < (self.Next or 0) or RemoteService.Busy then return true end
+    if now < (self.CheckpointNext or 0) or RemoteService.Busy then return false end
+    if self.LastCheckpoint == checkpoint and now - (self.LastCheckpointAt or 0) < 45 then return false end
 
-    local entrance = entering and SEA1_UNDERWATER_ENTRANCE or SEA1_MAIN_RETURN_ENTRANCE
-    self.Next = now + 1.25
-    self.PendingUntil = now + 2.5
-    self.LastRequested = entrance
-    local sent = RemoteService:Call("Entrance", 1.0, {"requestEntrance", entrance}, function(ok, response)
-        if ok then
-            self.Status = label .. " requested"
-            Runtime.ProgressAt = os.clock()
+    self.CheckpointNext = now + 12
+    Runtime.CheckpointStatus = "Setting " .. checkpoint .. " checkpoint…"
+    return RemoteService:Call("Checkpoint", 8, {"SetLastSpawnPoint", checkpoint}, function(ok, response)
+        if ok and response == 1 then
+            self.LastCheckpoint = checkpoint
+            self.LastCheckpointAt = os.clock()
+            Runtime.CheckpointStatus = checkpoint .. " checkpoint confirmed"
+        elseif ok then
+            Runtime.CheckpointStatus = checkpoint .. " checkpoint returned " .. tostring(response)
         else
-            self.Status = label .. " failed: " .. tostring(response)
-            log("Error", self.Status)
-            self.PendingUntil = 0
+            Runtime.CheckpointStatus = checkpoint .. " checkpoint failed: " .. tostring(response)
         end
-    end, {GenerationBound = false, Timeout = 8})
-    if not sent then self.PendingUntil = now + 0.25 end
-    return true
+    end, {GenerationBound = false, Timeout = 6})
+end
+function RegionService:TransitionFor(destination, origin, reason)
+    if typeof(destination) ~= "Vector3" or typeof(origin) ~= "Vector3" then return false end
+
+    if Runtime.Sea == "Sea1" then
+        local destinationUnderwater = self:IsUnderwater(destination)
+        local currentUnderwater = self:IsUnderwater(origin)
+        if destinationUnderwater == currentUnderwater then
+            self.Status = destinationUnderwater and "Underwater City" or "Main world"
+            return false
+        end
+
+        if Movement then Movement:Cancel("Sea 1 region transition") end
+        local entering = destinationUnderwater and not currentUnderwater
+        local label = entering and "Entering Underwater City" or "Leaving Underwater City"
+        self.DesiredUnderwater = destinationUnderwater
+        self.Status = label
+        state("REGION_TRAVEL", label .. (reason and (" · " .. tostring(reason)) or ""))
+
+        local now = os.clock()
+        if now < (self.PendingUntil or 0) then return true end
+        if now < (self.Next or 0) or RemoteService.Busy then return true end
+
+        local entrance = entering and SEA1_UNDERWATER_ENTRANCE or SEA1_MAIN_RETURN_ENTRANCE
+        self.Next = now + 1.25
+        self.PendingUntil = now + 2.5
+        self.LastRequested = entrance
+        local sent = RemoteService:Call("Entrance", 1.0, {"requestEntrance", entrance}, function(ok, response)
+            if ok then
+                self.Status = label .. " requested"
+                Runtime.ProgressAt = os.clock()
+            else
+                self.Status = label .. " failed: " .. tostring(response)
+                log("Error", self.Status)
+                self.PendingUntil = 0
+            end
+        end, {GenerationBound = false, Timeout = 8})
+        if not sent then self.PendingUntil = now + 0.25 end
+        return true
+    end
+
+    if Runtime.Sea == "Sea2" then
+        local destinationShip = self:IsCursedShip(destination)
+        local currentShip = self:IsCursedShip(origin)
+        if destinationShip == currentShip then
+            self.Status = destinationShip and "Cursed Ship interior" or "Second Sea main world"
+            return false
+        end
+
+        if Movement then Movement:Cancel("Sea 2 Cursed Ship transition") end
+        local entering = destinationShip and not currentShip
+        local label = entering and "Entering Cursed Ship" or "Leaving Cursed Ship"
+        self.DesiredCursedShip = destinationShip
+        self.Status = label
+        state("REGION_TRAVEL", label .. (reason and (" · " .. tostring(reason)) or ""))
+
+        local level = tonumber(value(Player and Player:FindFirstChild("Data"), "Level", 0)) or 0
+        if entering and level < 1000 then
+            self.Status = "Cursed Ship requires Level 1000"
+            return true
+        end
+
+        local now = os.clock()
+        if now < (self.PendingUntil or 0) then return true end
+        if now < (self.Next or 0) or RemoteService.Busy then return true end
+
+        local entrance = self:GhostShipEntrance(entering)
+        self.Next = now + 1.25
+        self.PendingUntil = now + 2.5
+        self.LastRequested = entrance
+        local sent = RemoteService:Call("Entrance", 1.0, {"requestEntrance", entrance}, function(ok, response)
+            if ok then
+                self.Status = label .. " requested"
+                Runtime.ProgressAt = os.clock()
+                -- The native AnimateEntrance client snaps HRP to TeleportSpawn immediately
+                -- after requestEntrance. Reproduce that local half only if replication leaves us
+                -- on the wrong side; this avoids a 30k-stud tween through the ocean.
+                task.delay(0.12, function()
+                    if not Runtime.Running or Runtime.Sea ~= "Sea2" then return end
+                    local _, _, root = char()
+                    if not root or self:IsCursedShip(root.Position) == entering then return end
+                    pcall(function()
+                        root.AssemblyLinearVelocity = Vector3.zero
+                        root.AssemblyAngularVelocity = Vector3.zero
+                        root.CFrame = CFrame.new(entrance + Vector3.new(0, 0.1, 0))
+                    end)
+                end)
+            else
+                self.Status = label .. " failed: " .. tostring(response)
+                log("Error", self.Status)
+                self.PendingUntil = 0
+            end
+        end, {GenerationBound = false, Timeout = 8})
+        if not sent then self.PendingUntil = now + 0.25 end
+        return true
+    end
+
+    return false
 end
 
 local function findModule(names)
@@ -5758,7 +6263,7 @@ for _, name in ipairs(COMBAT_HIT_PART_ORDER) do COMBAT_HIT_PART_SET[name] = true
 
 -- Cache active NPC enemies only. Stored templates are locations, never attack targets.
 EnemyService = {
-    Models = {}, Blocked = {}, SpawnPoints = {}, Connections = {}, Folder = nil, Spawns = nil, NextBind = 0,
+    Models = {}, Blocked = {}, SpawnPoints = {}, Connections = {}, Folder = nil, Spawns = nil, TemplateSpawns = nil, NextBind = 0,
     DamageMeta = setmetatable({}, {__mode = "k"}), DamageNext = 0,
 }
 function EnemyService:Remember(name, position)
@@ -5791,9 +6296,12 @@ function EnemyService:Bind()
     self.NextBind = os.clock() + 2
     local folder = workspace:FindFirstChild("Enemies")
     local spawns = path(workspace, "_WorldOrigin", "EnemySpawns")
-    if folder == self.Folder and spawns == self.Spawns then return end
+    -- The supplied Second Sea dump exposes every normal/boss spawn here even before
+    -- workspace enemies stream. Seed route targets from it instead of wandering.
+    local templateSpawns = RS:FindFirstChild("FortBuilderReplicatedSpawnPositionsFolder")
+    if folder == self.Folder and spawns == self.Spawns and templateSpawns == self.TemplateSpawns then return end
     disconnectAll(self.Connections)
-    self.Models, self.Folder, self.Spawns = {}, folder, spawns
+    self.Models, self.Folder, self.Spawns, self.TemplateSpawns = {}, folder, spawns, templateSpawns
     self.DamageMeta = setmetatable({}, {__mode = "k"})
     if folder then
         connect(folder.ChildAdded, function(m) self:Observe(m) end, self.Connections)
@@ -5802,11 +6310,14 @@ function EnemyService:Bind()
         end, self.Connections)
         for _, m in ipairs(folder:GetChildren()) do self:Observe(m) end
     end
-    if spawns then
+    local function bindSpawnFolder(spawnFolder)
+        if not spawnFolder then return end
         local function remember(s) self:Remember(s:GetAttribute("DisplayName") or s.Name, pos(s)) end
-        connect(spawns.ChildAdded, remember, self.Connections)
-        for _, s in ipairs(spawns:GetChildren()) do remember(s) end
+        connect(spawnFolder.ChildAdded, remember, self.Connections)
+        for _, spawn in ipairs(spawnFolder:GetChildren()) do remember(spawn) end
     end
+    bindSpawnFolder(spawns)
+    bindSpawnFolder(templateSpawns)
 end
 function EnemyService:CombatPart(m)
     if not m then return nil end
@@ -5902,10 +6413,14 @@ function EnemyService:NearestSpawn(name, origin)
         local d = (p - origin).Magnitude
         if not distance or d < distance then best, distance = p, d end
     end
-    if not best and Runtime.Sea == "Sea1" then
-        for _, a in ipairs(GameData.sea1Spawns[name] or {}) do
-            local p = vec(a); local d = (p - origin).Magnitude
-            if not distance or d < distance then best, distance = p, d end
+    if not best then
+        local static = Runtime.Sea == "Sea1" and GameData.sea1Spawns
+            or Runtime.Sea == "Sea2" and GameData.sea2Spawns
+        if static then
+            for _, a in ipairs(static[name] or {}) do
+                local p = vec(a); local d = (p - origin).Magnitude
+                if not distance or d < distance then best, distance = p, d end
+            end
         end
     end
     return best
@@ -5967,14 +6482,18 @@ function QuestService:Position(id, origin)
     -- Controller:Step: one bad/partially replicated NPC must never crash Auto Level.
     local npcName = self:NPCName(id)
     if npcName then
-        local ok, livePosition = pcall(function()
-            local folder = workspace:FindFirstChild("NPCs")
-            if not folder then return nil end
-            local npc = folder:FindFirstChild(npcName, true)
-            if not npc or (not npc:IsA("Model") and not npc:IsA("BasePart")) then return nil end
-            return pos(npc)
-        end)
-        if ok then consider(livePosition) end
+        -- Second Sea keeps quest giver rigs in ReplicatedStorage.NPCs in the supplied
+        -- dump, while live clients may stream a copy into workspace.NPCs. Check both.
+        for _, folder in ipairs({workspace:FindFirstChild("NPCs") or false, RS:FindFirstChild("NPCs") or false}) do
+            if folder then
+                local ok, livePosition = pcall(function()
+                    local npc = folder:FindFirstChild(npcName, true)
+                    if not npc or (not npc:IsA("Model") and not npc:IsA("BasePart")) then return nil end
+                    return pos(npc)
+                end)
+                if ok then consider(livePosition) end
+            end
+        end
 
         -- Background cache is still useful, but reading it is optional and guarded.
         pcall(function() self:RefreshNPCIndex() end)
@@ -5994,8 +6513,10 @@ function QuestService:Position(id, origin)
     end
     if best then return best end
 
-    if Runtime.Sea == "Sea1" then
-        for _, p in ipairs(GameData.sea1NPCPositions[id] or {}) do consider(vec(p)) end
+    local staticNPCs = Runtime.Sea == "Sea1" and GameData.sea1NPCPositions
+        or Runtime.Sea == "Sea2" and GameData.sea2NPCPositions
+    if staticNPCs then
+        for _, p in ipairs(staticNPCs[id] or {}) do consider(vec(p)) end
     end
     return best
 end
@@ -6108,7 +6629,227 @@ function QuestService:Reject(q, reason)
     release(reason)
 end
 
-Movement = {Connection = nil, Goal = nil, Owner = nil, Saved = {}, Failures = 0, Error = nil, EffectiveMode = nil, CombatTween = nil, CombatTweenGoal = nil, NextCombatTween = 0, BasisTarget = nil, BasisForward = nil, BasisRight = nil}
+Movement = {Connection = nil, Goal = nil, Owner = nil, Saved = {}, Failures = 0, Error = nil, EffectiveMode = nil, CombatTween = nil, CombatTweenGoal = nil, NextCombatTween = 0, BasisTarget = nil, BasisForward = nil, BasisRight = nil, WaterParams = nil, WaterGuard = nil, WaterGuardPost = nil, WaterProbeCache = {}}
+
+-- Blox Fruit users take damage from ocean water. Keep protection in the shared
+-- movement layer so quest travel, combat follow, fruit/dealer travel and dodges all
+-- obey the same rule. Terrain water is detected with a downward ray; real solid
+-- land, boats and platforms take priority over water beneath them.
+function Movement:WaterRayParams()
+    if self.WaterParams then return self.WaterParams end
+    local ok, params = pcall(RaycastParams.new)
+    if not ok or not params then return nil end
+    pcall(function() params.FilterType = Enum.RaycastFilterType.Exclude end)
+    pcall(function() params.IgnoreWater = false end)
+    pcall(function() params.RespectCanCollide = false end)
+    self.WaterParams = params
+    return params
+end
+
+local WATER_FOOTPRINT_RADIUS = 5.5
+local WATER_LOOKAHEAD = 16
+local WATER_CACHE_TTL = 0.12
+local WATER_PROBE_GRID = 3
+
+local function waterLikeInstance(inst)
+    if not inst then return false end
+    local name = string.lower(tostring(inst.Name or ""))
+    if name == "water" or name == "ocean" or name == "sea" or string.find(name, "ocean", 1, true) then return true end
+    return false
+end
+
+function Movement:WaterSurfaceAt(position)
+    if Config.AvoidWater ~= true or typeof(position) ~= "Vector3" then return nil end
+    -- Underwater City is a dry interior stored tens of thousands of studs away.
+    -- RegionService/requestEntrance owns that transition; do not apply ocean safety there.
+    if RegionService and (RegionService:IsUnderwater(position) or RegionService:IsCursedShip(position)) then return nil end
+
+    -- Water height only changes slowly across the map, so cache probes briefly. This
+    -- makes footprint/look-ahead sampling cheap enough to run every movement frame.
+    local gx = math.floor(position.X / WATER_PROBE_GRID + 0.5)
+    local gz = math.floor(position.Z / WATER_PROBE_GRID + 0.5)
+    local cacheKey = tostring(gx) .. ":" .. tostring(gz)
+    local cached = self.WaterProbeCache and self.WaterProbeCache[cacheKey]
+    local now = os.clock()
+    if cached and now - cached.At <= WATER_CACHE_TTL then return cached.Y end
+
+    local params = self:WaterRayParams()
+    if not params then return nil end
+    local character = Player and Player.Character
+    local exclusions = {}
+    if character then table.insert(exclusions, character) end
+
+    local clearance = math.max(12, tonumber(Config.WaterClearance) or 22)
+    local probeAbove = math.max(90, clearance + 58)
+    local probeBelow = math.max(210, clearance + 155)
+    local origin = position + Vector3.new(0, probeAbove, 0)
+    local remaining = probeAbove + probeBelow
+    local waterY = nil
+
+    for _ = 1, 8 do
+        pcall(function() params.FilterDescendantsInstances = exclusions end)
+        local ok, hit = pcall(workspace.Raycast, workspace, origin, Vector3.new(0, -remaining, 0), params)
+        if not ok or not hit then break end
+
+        local inst = hit.Instance
+        if hit.Material == Enum.Material.Water or waterLikeInstance(inst) then
+            waterY = hit.Position.Y
+            break
+        end
+
+        -- A real collidable surface is safe to stand/fly above and intentionally masks
+        -- water below it (islands, docks, boats, bridges). Cosmetic pieces do not.
+        local skip = false
+        if inst and inst ~= workspace.Terrain then
+            pcall(function()
+                if inst:IsA("BasePart") then
+                    skip = inst.CanCollide == false or inst.Transparency >= 0.98
+                end
+            end)
+        end
+        if not skip or not inst then break end
+
+        table.insert(exclusions, inst)
+        local travelled = math.max(0.1, origin.Y - hit.Position.Y + 0.05)
+        remaining = remaining - travelled
+        if remaining <= 0.1 then break end
+        origin = hit.Position - Vector3.new(0, 0.05, 0)
+    end
+
+    self.WaterProbeCache = self.WaterProbeCache or {}
+    self.WaterProbeCache[cacheKey] = {At = now, Y = waterY}
+    if next(self.WaterProbeCache) and math.random(1, 120) == 1 then
+        for key, item in pairs(self.WaterProbeCache) do
+            if now - item.At > 1.5 then self.WaterProbeCache[key] = nil end
+        end
+    end
+    return waterY
+end
+
+function Movement:WaterSurfaceAround(position, radius)
+    if Config.AvoidWater ~= true or typeof(position) ~= "Vector3" then return nil end
+    radius = tonumber(radius) or WATER_FOOTPRINT_RADIUS
+    local diagonal = radius * 0.72
+    local offsets = {
+        Vector3.zero,
+        Vector3.new(radius, 0, 0), Vector3.new(-radius, 0, 0),
+        Vector3.new(0, 0, radius), Vector3.new(0, 0, -radius),
+        Vector3.new(diagonal, 0, diagonal), Vector3.new(-diagonal, 0, diagonal),
+        Vector3.new(diagonal, 0, -diagonal), Vector3.new(-diagonal, 0, -diagonal),
+    }
+    local highest = nil
+    for _, offset in ipairs(offsets) do
+        local y = self:WaterSurfaceAt(position + offset)
+        if y ~= nil and (highest == nil or y > highest) then highest = y end
+    end
+    return highest
+end
+
+function Movement:WaterAheadSurface(fromPosition, desiredPosition)
+    if Config.AvoidWater ~= true or typeof(fromPosition) ~= "Vector3" or typeof(desiredPosition) ~= "Vector3" then return nil end
+    local flat = Vector3.new(desiredPosition.X - fromPosition.X, 0, desiredPosition.Z - fromPosition.Z)
+    local flatDistance = flat.Magnitude
+    local direction = flatDistance > 0.01 and flat.Unit or Vector3.zero
+    local endPosition = desiredPosition
+    if flatDistance > 0.01 then endPosition = desiredPosition + direction * WATER_LOOKAHEAD end
+    local scan = Vector3.new(endPosition.X - fromPosition.X, 0, endPosition.Z - fromPosition.Z)
+    local scanDistance = scan.Magnitude
+    local steps = math.clamp(math.ceil(scanDistance / 4), 1, 8)
+    local highest = nil
+    local sampleY = math.max(fromPosition.Y, desiredPosition.Y)
+    for i = 0, steps do
+        local alpha = i / steps
+        local p = Vector3.new(
+            fromPosition.X + scan.X * alpha,
+            sampleY,
+            fromPosition.Z + scan.Z * alpha
+        )
+        local y = self:WaterSurfaceAround(p, WATER_FOOTPRINT_RADIUS)
+        if y ~= nil and (highest == nil or y > highest) then highest = y end
+    end
+    return highest
+end
+
+function Movement:WaterSafePosition(position)
+    if Config.AvoidWater ~= true or typeof(position) ~= "Vector3" then return position end
+    local waterY = self:WaterSurfaceAround(position, WATER_FOOTPRINT_RADIUS)
+    if waterY == nil then return position end
+    local clearance = math.max(12, tonumber(Config.WaterClearance) or 22)
+    local safeY = waterY + clearance
+    if position.Y < safeY then
+        Runtime.WaterSafetyStatus = string.format("Protecting footprint · water %.1f · root %.1f", waterY, safeY)
+        return Vector3.new(position.X, safeY, position.Z)
+    end
+    Runtime.WaterSafetyStatus = string.format("Safe · %.1f studs above nearby water", position.Y - waterY)
+    return position
+end
+
+function Movement:WaterSafeStep(fromPosition, desiredPosition)
+    if Config.AvoidWater ~= true then return desiredPosition end
+    local waterY = self:WaterAheadSurface(fromPosition, desiredPosition)
+    if waterY == nil then return self:WaterSafePosition(desiredPosition) end
+
+    local clearance = math.max(12, tonumber(Config.WaterClearance) or 22)
+    local safeY = waterY + clearance
+    local flatDelta = Vector3.new(desiredPosition.X - fromPosition.X, 0, desiredPosition.Z - fromPosition.Z)
+
+    -- Critical shoreline rule: never translate horizontally toward detected water while
+    -- the character is still below cruise height. Ascend at the current dry X/Z first.
+    if flatDelta.Magnitude > 0.05 and fromPosition.Y < safeY - 0.25 then
+        Runtime.WaterSafetyStatus = string.format("CLIMBING BEFORE WATER · %.1f -> %.1f", fromPosition.Y, safeY)
+        return Vector3.new(fromPosition.X, safeY, fromPosition.Z)
+    end
+
+    if desiredPosition.Y < safeY then
+        Runtime.WaterSafetyStatus = string.format("OVER-WATER CRUISE · holding %.1f", safeY)
+        return Vector3.new(desiredPosition.X, safeY, desiredPosition.Z)
+    end
+    return desiredPosition
+end
+
+function Movement:EnforceWaterGuard(root)
+    if Config.AvoidWater ~= true or not root or not root.Parent then return false end
+    local waterY = self:WaterSurfaceAround(root.Position, WATER_FOOTPRINT_RADIUS + 1.5)
+    if waterY == nil then return false end
+    local clearance = math.max(12, tonumber(Config.WaterClearance) or 22)
+    local safeY = waterY + clearance
+    if root.Position.Y >= safeY - 0.15 then return false end
+
+    local rotation = root.CFrame.Rotation
+    root.CFrame = CFrame.new(root.Position.X, safeY, root.Position.Z) * rotation
+    root.AssemblyLinearVelocity = Vector3.zero
+    root.AssemblyAngularVelocity = Vector3.zero
+    Runtime.WaterSafetyStatus = "EMERGENCY WATER BLOCK · snapped above surface before contact"
+    return true
+end
+
+function Movement:BindWaterGuard()
+    if self.WaterGuard then return end
+    local function enforce()
+        if not Runtime.Running or Config.AvoidWater ~= true then return end
+        local _, humanoid, root = char()
+        if root then
+            local ok, err = pcall(function()
+                if self:EnforceWaterGuard(root) and humanoid then
+                    humanoid:Move(Vector3.zero)
+                    pcall(humanoid.MoveTo, humanoid, root.Position)
+                end
+            end)
+            if not ok then Runtime.WaterSafetyStatus = "Water guard unavailable: " .. tostring(err) end
+        end
+    end
+
+    -- PreSimulation blocks physics from carrying limbs into the ocean. PostSimulation
+    -- catches any external/game movement that occurs later in the same frame.
+    self.WaterGuard = RunService.PreSimulation:Connect(enforce)
+    table.insert(Runtime.Connections, self.WaterGuard)
+    local ok, postSignal = pcall(function() return RunService.PostSimulation end)
+    if ok and postSignal then
+        self.WaterGuardPost = postSignal:Connect(enforce)
+        table.insert(Runtime.Connections, self.WaterGuardPost)
+    end
+end
+
 function Movement:Restore()
     for part, saved in pairs(self.Saved) do
         if part.Parent then
@@ -6169,13 +6910,15 @@ function Movement:GoTo(owner, goal, tolerance, hold, requestKey)
         self.Error = nil
     end
     self.Goal, self.Tolerance, self.Hold = goal, tolerance or 3, hold == true
-    self.Arrived = (r.Position - goal.Position).Magnitude <= self.Tolerance
+    local initialGoalPosition = self:WaterSafePosition(goal.Position)
+    self.Arrived = (r.Position - initialGoalPosition).Magnitude <= self.Tolerance
     if Runtime.Target and requestKey == Runtime.Target and self.Hold then self:BindCombatFacing() end
     if self.Connection then return self.Arrived end
     self.Connection = RunService.Heartbeat:Connect(function(dt)
         local character, humanoid, root = char()
         if not Runtime.Running or not character or not self.Goal or Runtime.Owner ~= self.Owner then self:Cancel("Invalid owner/character"); return end
-        local delta = self.Goal.Position - root.Position
+        local effectiveGoalPosition = self:WaterSafePosition(self.Goal.Position)
+        local delta = effectiveGoalPosition - root.Position
         local distance = delta.Magnitude
         self.Arrived = distance <= self.Tolerance
         if self.Arrived then self.Started = os.clock() end
@@ -6183,7 +6926,10 @@ function Movement:GoTo(owner, goal, tolerance, hold, requestKey)
         local farmOwner = self.Owner == "Level" or self.Owner == "Boss" or self.Owner == "Enemy"
         local verticalFarm = farmOwner and (Config.Position == "Above" or Config.Position == "Below" or Config.Position == "Orbit" or math.abs(tonumber(Config.Height) or 0) > 3)
         local movementMode = Config.Movement == "Walk" and verticalFarm and "Smooth" or Config.Movement
-        self.EffectiveMode = movementMode
+        -- Humanoid MoveTo can choose a route through the ocean. Water-safe mode always
+        -- uses bounded Smooth motion so every intermediate X/Z position is checked first.
+        if Config.AvoidWater == true then movementMode = "Smooth" end
+        self.EffectiveMode = movementMode == "Smooth" and Config.AvoidWater == true and "Smooth · water-safe" or movementMode
 
         -- Auto Dodge owns translation for a few tenths of a second. The old system only
         -- changed Movement.Goal, so the normal follow could immediately counter-steer and
@@ -6193,7 +6939,7 @@ function Movement:GoTo(owner, goal, tolerance, hold, requestKey)
         local dodgeMoved = DodgeService and DodgeService:IsDodging() and DodgeService:StepMotion(root, humanoid, dt)
         if not dodgeMoved then
             if movementMode == "Walk" then
-                if os.clock() >= (self.NextWalk or 0) then humanoid:MoveTo(self.Goal.Position); self.NextWalk = os.clock() + 0.4 end
+                if os.clock() >= (self.NextWalk or 0) then humanoid:MoveTo(effectiveGoalPosition); self.NextWalk = os.clock() + 0.4 end
             else
                 humanoid.AutoRotate = false
                 if Config.NoCollision then
@@ -6221,7 +6967,8 @@ function Movement:GoTo(owner, goal, tolerance, hold, requestKey)
                     if eased.Magnitude > maxStep and eased.Magnitude > 0 then
                         eased = eased.Unit * maxStep
                     end
-                    local nextPosition = distance > 0.02 and (root.Position + eased) or self.Goal.Position
+                    local nextPosition = distance > 0.02 and (root.Position + eased) or effectiveGoalPosition
+                    nextPosition = self:WaterSafeStep(root.Position, nextPosition)
                     root.CFrame = CFrame.new(nextPosition) * self.Goal.Rotation
                     root.AssemblyLinearVelocity = Vector3.zero
                     root.AssemblyAngularVelocity = Vector3.zero
@@ -6231,12 +6978,15 @@ function Movement:GoTo(owner, goal, tolerance, hold, requestKey)
                     local speed = math.max(1, tonumber(Config.Speed) or 100)
                     local step = math.min(distance, speed * math.min(dt, 0.1))
                     local nextPosition = distance > 0.01 and root.Position + delta.Unit * step or root.Position
+                    nextPosition = self:WaterSafeStep(root.Position, nextPosition)
                     root.CFrame = CFrame.new(nextPosition) * self.Goal.Rotation
                     root.AssemblyLinearVelocity = Vector3.zero
                     root.AssemblyAngularVelocity = Vector3.zero
                 end
             end
         end
+        -- Last line of defence if physics or a dodge burst reaches an ocean edge.
+        if Config.AvoidWater == true then self:EnforceWaterGuard(root) end
         if os.clock() - self.CheckAt >= 5 then
             local progress = (root.Position - self.CheckPosition).Magnitude
             if not self.Arrived and progress < 3 then
@@ -6497,6 +7247,7 @@ function DodgeService:StepMotion(root, humanoid, dt)
     local maxStep = burstSpeed * safeDt
     if delta.Magnitude > maxStep and maxStep > 0 then desired = root.Position + delta.Unit * maxStep end
 
+    if Movement and Config.AvoidWater == true then desired = Movement:WaterSafeStep(root.Position, desired) end
     local rotation = root.CFrame.Rotation
     if Movement and Movement.Goal then rotation = Movement.Goal.Rotation end
     root.CFrame = CFrame.new(desired) * rotation
@@ -6621,6 +7372,76 @@ function WeaponService:Choose(finishing)
     end
     return best
 end
+local HYBRID_KICK_STYLE_NAMES = {
+    ["Black Leg"] = true, ["Dark Step"] = true, ["Death Step"] = true,
+}
+local function hybridToolMastery(tool)
+    if not tool then return 0 end
+    local level = tool:GetAttribute("Level")
+    if type(level) == "number" then return level end
+    local valueObject = tool:FindFirstChild("Level")
+    if valueObject and valueObject:IsA("ValueBase") and type(valueObject.Value) == "number" then return valueObject.Value end
+    return 0
+end
+function WeaponService:ChooseStrongestNonFruit()
+    self:Refresh()
+    local best, bestScore
+    for _, entry in ipairs(self.List) do
+        local tool, data = entry.Tool, entry.Data
+        local weaponType = data and data.WeaponType or "Unknown"
+        if tool and tool.Parent and weaponType ~= "Demon Fruit" then
+            local score = weaponType == "Melee" and 400 or weaponType == "Sword" and 350 or weaponType == "Gun" and 300 or 150
+            score += math.min(200, hybridToolMastery(tool)) * 0.25
+            if tool.Parent == Player.Character then score += 15 end
+            if entry.Native then score += 5 end
+            if not bestScore or score > bestScore then best, bestScore = entry, score end
+        end
+    end
+    return best
+end
+function WeaponService:ChooseHybridMelee()
+    self:Refresh()
+    local wanted = tostring(Config.HybridMeleeWeapon or "Auto melee / kick style")
+    local auto = wanted == "Auto melee / kick style"
+    local best, bestScore
+    for _, entry in ipairs(self.List) do
+        local tool, data = entry.Tool, entry.Data
+        if tool and tool.Parent and data and data.WeaponType == "Melee" and (auto or tool.Name == wanted) then
+            local score = hybridToolMastery(tool)
+            if HYBRID_KICK_STYLE_NAMES[tool.Name] then score += 1000 end
+            if tool.Parent == Player.Character then score += 25 end
+            if entry.Native then score += 5 end
+            if not bestScore or score > bestScore then best, bestScore = entry, score end
+        end
+    end
+    return best
+end
+function WeaponService:ChooseHybridFruit()
+    self:Refresh()
+    local wanted = tostring(Config.HybridFruitWeapon or "Auto fruit")
+    local auto = wanted == "Auto fruit"
+    local best, bestScore
+    for _, entry in ipairs(self.List) do
+        local tool, data = entry.Tool, entry.Data
+        if tool and tool.Parent and data and data.WeaponType == "Demon Fruit" and (auto or tool.Name == wanted) then
+            local score = hybridToolMastery(tool)
+            if tool.Parent == Player.Character then score += 25 end
+            if entry.Native then score += 5 end
+            if not bestScore or score > bestScore then best, bestScore = entry, score end
+        end
+    end
+    return best
+end
+function WeaponService:ChooseHybridPrimary()
+    local mode = tostring(Config.HybridPrimary or "Strongest non-fruit")
+    if mode == "Melee / kick style" then return self:ChooseHybridMelee() end
+    if mode == "Farm weapon" then
+        local picked = self:Choose(false)
+        if picked and picked.Data and picked.Data.WeaponType ~= "Demon Fruit" then return picked end
+        return self:ChooseStrongestNonFruit()
+    end
+    return self:ChooseStrongestNonFruit()
+end
 function WeaponService:Equip(entry)
     local c, h = char()
     if not c or not entry or not entry.Tool or not entry.Tool.Parent then return false end
@@ -6643,7 +7464,9 @@ function WeaponService:Equip(entry)
 end
 Combat = {Entry = nil, LastAttack = 0, LastM1Attack = 0, Camera = nil, CameraFrame = nil, CameraBound = nil, AimPart = nil, BlockedUntil = 0,
     SwingUntil = 0, WatchTarget = nil, WatchTool = nil, WatchHealth = nil,
-    NoDamageAt = 0, InputRetry = false, ComboCount = 0, ComboPendingSkill = false}
+    NoDamageAt = 0, InputRetry = false, ComboCount = 0, ComboPendingSkill = false,
+    AckSequence = 0, LastCountedAckSequence = 0, LastAckAt = 0, LastAckCombo = 0,
+    LastRequestAt = 0, PendingAckSince = 0}
 
 function Combat:Observe(target, humanoid, entry)
     local now = os.clock()
@@ -6652,6 +7475,8 @@ function Combat:Observe(target, humanoid, entry)
         self.WatchHealth, self.NoDamageAt = humanoid.Health, now
         self.InputRetry, self.SwingUntil = false, 0
         self.ComboCount, self.ComboPendingSkill = 0, false
+        self.LastCountedAckSequence = self.AckSequence or 0
+        self.PendingAckSince = 0
     elseif humanoid.Health < (self.WatchHealth or humanoid.Health) then
         self.NoDamageAt = now
     end
@@ -6662,7 +7487,12 @@ function Combat:Observe(target, humanoid, entry)
         self.NoDamageAt = now
         return
     end
-    if now - self.NoDamageAt >= 4 then self.InputRetry = true end
+    if Runtime.AttackAckAvailable and (self.PendingAckSince or 0) > 0 and now - self.PendingAckSince >= 0.9 then
+        self.InputRetry = true
+        Runtime.M1Status = "M1 input was not acknowledged · switching input route"
+    elseif now - self.NoDamageAt >= 4 then
+        self.InputRetry = true
+    end
 end
 
 function Combat:SwingDuration(entry)
@@ -6719,6 +7549,8 @@ function Combat:Stop()
     self.Entry = nil
     self.SwingUntil = 0
     self.ComboCount, self.ComboPendingSkill = 0, false
+    self.PendingAckSince = 0
+    self.LastCountedAckSequence = self.AckSequence or 0
     self.AimPart = nil
     if self.CameraBound then
         RunService:UnbindFromRenderStep("PuckAFK_BF_CameraLock")
@@ -6829,10 +7661,11 @@ function Combat:Attack(entry, targetRoot, aimPart)
     end
 
     local fired = false
-    -- Real's documented mouse1click is the most direct executor input path.
-    -- It intentionally no-ops while Roblox is not foreground, so only treat it
-    -- as authoritative when Real reports the client is active.
-    if IS_REAL and executorWindowActive() and type(mouse1click) == "function" then
+    local preferVIM = weaponType == "Melee" and Runtime.AttackAckAvailable and self.InputRetry
+
+    -- After an unacknowledged click, prefer VirtualInputManager because it lets us place the
+    -- click at a UI-safe point. Otherwise Real's native mouse1click remains the fastest route.
+    if not preferVIM and IS_REAL and executorWindowActive() and type(mouse1click) == "function" then
         fired = pcall(mouse1click)
         if fired then Runtime.CombatPath = "Real mouse1click" end
     end
@@ -6844,10 +7677,13 @@ function Combat:Attack(entry, targetRoot, aimPart)
                 task.wait(0.03)
                 vim:SendMouseButtonEvent(x, y, 0, false, game, 0)
             end)
-            if fired then Runtime.CombatPath = "VirtualInputManager M1" end
+            if fired then Runtime.CombatPath = preferVIM and "VIM M1 · ack recovery" or "VirtualInputManager M1" end
         end
     end
-    if not fired and type(mouse1click) == "function" then fired = pcall(mouse1click) end
+    if not fired and type(mouse1click) == "function" then
+        fired = pcall(mouse1click)
+        if fired then Runtime.CombatPath = "mouse1click fallback" end
+    end
     if not fired then fired = pcall(entry.Tool.Activate, entry.Tool) end
 
     if not fired then
@@ -6858,6 +7694,11 @@ function Combat:Attack(entry, targetRoot, aimPart)
     end
 
     self.LastM1Attack = os.clock()
+    if weaponType == "Melee" and Runtime.AttackAckAvailable then
+        self.LastRequestAt = self.LastM1Attack
+        if (self.PendingAckSince or 0) <= 0 then self.PendingAckSince = self.LastM1Attack end
+        Runtime.M1Status = "M1 input sent · waiting for server acknowledgement"
+    end
     -- Melee Mouse1 must remain free to continue its natural click chain.
     if weaponType ~= "Melee" and weaponType ~= "Gun" then self.SwingUntil = os.clock() + self:SwingDuration(entry) end
     return true
@@ -6978,9 +7819,53 @@ function CombatSkillService:RestoreAim(record)
         record.Camera.CFrame = record.CFrame
     end
 end
-function CombatSkillService:Step(entry, targetRoot)
+
+function CombatSkillService:ObservedMovesetFallback(tool, key, targetRoot)
+    -- Observed in the second Cobalt capture: MovesetClientRunner invokes an empty-named
+    -- RemoteFunction parented under the local Humanoid with Z/X/C. This is never the
+    -- primary route and is only attempted after normal executor key input fails.
+    if key ~= "Z" and key ~= "X" and key ~= "C" then return false end
+    local _, humanoid = char()
+    if not humanoid then return false end
+    local moveRemote = humanoid:FindFirstChild("")
+    if not moveRemote or not moveRemote:IsA("RemoteFunction") then
+        moveRemote = nil
+        for _, child in ipairs(humanoid:GetChildren()) do
+            if child.Name == "" and child:IsA("RemoteFunction") then moveRemote = child; break end
+        end
+    end
+    if not moveRemote then return false end
+
+    local toolRemote = tool and tool:FindFirstChild("RemoteEvent")
+    local streamedTool = tool and (tool.Name == "Black Leg" or tool.Name == "Diamond-Diamond")
+        and toolRemote and toolRemote:IsA("RemoteEvent")
+    if streamedTool then
+        pcall(toolRemote.FireServer, toolRemote, true)
+        if targetRoot and targetRoot.Parent then pcall(toolRemote.FireServer, toolRemote, targetRoot.Position) end
+    end
+
+    local ok = pcall(moveRemote.InvokeServer, moveRemote, key)
+    if streamedTool then
+        if targetRoot and targetRoot.Parent then pcall(toolRemote.FireServer, toolRemote, targetRoot.Position) end
+        pcall(toolRemote.FireServer, toolRemote, false)
+    end
+    if ok then Runtime.SkillRemoteStatus = "Verified Humanoid fallback · " .. tostring(key) end
+    return ok
+end
+
+function CombatSkillService:ObservedVectorAim(tool, targetRoot)
+    -- Captures show Black Leg and Diamond-Diamond streaming a Vector3 target through
+    -- tool.RemoteEvent while a skill is active. This helper only reinforces aim after
+    -- real key input already started the skill; it never starts a cast itself.
+    if not Config.SkillAim or not tool or (tool.Name ~= "Black Leg" and tool.Name ~= "Diamond-Diamond")
+        or not targetRoot or not targetRoot.Parent then return false end
+    local event = tool:FindFirstChild("RemoteEvent")
+    if not event or not event:IsA("RemoteEvent") then return false end
+    return pcall(event.FireServer, event, targetRoot.Position)
+end
+function CombatSkillService:Step(entry, targetRoot, force)
     if Runtime.NPCInteracting then return false end
-    if not Config.AutoSkills or not entry or not entry.Tool or entry.Tool.Parent ~= Player.Character then return false end
+    if (not Config.AutoSkills and not force) or not entry or not entry.Tool or entry.Tool.Parent ~= Player.Character then return false end
     local _, _, root = char()
     if not root or not targetRoot or (root.Position - targetRoot.Position).Magnitude > Config.SkillMaxRange then return false end
     local now = os.clock()
@@ -7006,12 +7891,19 @@ function CombatSkillService:Step(entry, targetRoot)
                 local aim = self:Aim(targetRoot)
                 local pressed = self:SendKey(key, true)
                 if pressed then
+                    Runtime.SkillRemoteStatus = "Native key input · " .. tostring(key)
+                    self:ObservedVectorAim(entry.Tool, targetRoot)
                     task.wait(math.clamp(Config.SkillHold, 0.05, 1.5))
+                    self:ObservedVectorAim(entry.Tool, targetRoot)
                     self:SendKey(key, false)
                 else
-                    log("Error", "Skill input unavailable; executor cannot synthesize Z/X/C/V/F")
-                    Config.AutoSkills = false
-                    if Runtime.Controls and Runtime.Controls.AutoSkills then Runtime.Controls.AutoSkills:Set(false) end
+                    local fallback = self:ObservedMovesetFallback(entry.Tool, key, targetRoot)
+                    if not fallback then
+                        Runtime.SkillRemoteStatus = "No usable skill input route"
+                        log("Error", "Skill input unavailable; key synthesis and verified fallback both failed")
+                        Config.AutoSkills = false
+                        if Runtime.Controls and Runtime.Controls.AutoSkills then Runtime.Controls.AutoSkills:Set(false) end
+                    end
                 end
                 task.wait(0.05)
                 self:RestoreAim(aim)
@@ -7271,6 +8163,7 @@ end
 FruitPickupService = {
     Items = setmetatable({}, {__mode = "k"}), Connections = {}, Current = nil, Started = 0,
     PendingStore = nil, StoreNext = 0, Bound = false, Blocked = setmetatable({}, {__mode = "k"}),
+    ESP = setmetatable({}, {__mode = "k"}),
     ExistingScanDone = false, ExistingScanBusy = false,
 }
 function FruitPickupService:IsFruit(tool)
@@ -7289,11 +8182,122 @@ function FruitPickupService:IsPlayerDropped(tool)
     local name = tool:GetAttribute("DroppedBy")
     return id ~= nil or type(name) == "string" and name ~= ""
 end
+function FruitPickupService:HeldByPlayer(tool)
+    if not tool then return nil end
+    local node = tool.Parent
+    while node and node ~= workspace do
+        if node:IsA("Model") then
+            local player = Players:GetPlayerFromCharacter(node)
+            if player then return player end
+        end
+        node = node.Parent
+    end
+    -- Backpack tools are not descendants of workspace, but keep the explicit check
+    -- here so all callers can use one authoritative held/inventory predicate.
+    for _, player in ipairs(Players:GetPlayers()) do
+        local backpack = player:FindFirstChildOfClass("Backpack")
+        if backpack and tool:IsDescendantOf(backpack) then return player end
+    end
+    return nil
+end
 function FruitPickupService:IsWorldFruit(tool)
-    return self:IsFruit(tool) and tool:IsDescendantOf(workspace) and not self:IsPlayerDropped(tool)
+    -- A fruit equipped by another player is still a descendant of workspace because
+    -- their Character lives there.  Never use workspace ancestry alone to classify
+    -- ground fruits: held/inventory fruits must be rejected before ESP or movement.
+    return self:IsFruit(tool)
+        and tool:IsDescendantOf(workspace)
+        and not self:IsPlayerDropped(tool)
+        and self:HeldByPlayer(tool) == nil
+end
+function FruitPickupService:DisplayName(tool)
+    local original = tool and tool:GetAttribute("OriginalName")
+    local name = type(original) == "string" and original ~= "" and original or tool and tool.Name or "Blox Fruit"
+    return tostring(name):gsub("%-Fruit$", " Fruit")
+end
+function FruitPickupService:RemoveESP(tool)
+    local record = self.ESP[tool]
+    if not record then return end
+    if record.Gui then pcall(record.Gui.Destroy, record.Gui) end
+    if record.Highlight then pcall(record.Highlight.Destroy, record.Highlight) end
+    self.ESP[tool] = nil
+end
+function FruitPickupService:EnsureESP(tool)
+    if not Config.GroundFruitESP or not self:IsWorldFruit(tool) then self:RemoveESP(tool); return nil end
+    local handle = self:Handle(tool)
+    if not handle then self:RemoveESP(tool); return nil end
+    local record = self.ESP[tool]
+    if record and record.Gui and record.Gui.Parent and record.Highlight and record.Highlight.Parent then
+        record.Gui.Adornee = handle
+        record.Highlight.Adornee = tool
+        return record
+    end
+    self:RemoveESP(tool)
+    local playerGui = Player and Player:FindFirstChildOfClass("PlayerGui")
+    if not playerGui then return nil end
+
+    local gui = Instance.new("BillboardGui")
+    gui.Name = "PuckAFK_GroundFruitESP"
+    gui.AlwaysOnTop = true
+    gui.LightInfluence = 0
+    gui.MaxDistance = 100000
+    gui.Size = UDim2.fromOffset(190, 52)
+    gui.StudsOffsetWorldSpace = Vector3.new(0, 3.2, 0)
+    gui.Adornee = handle
+    gui.Parent = playerGui
+
+    local label = Instance.new("TextLabel")
+    label.Name = "Label"
+    label.BackgroundTransparency = 0.2
+    label.BackgroundColor3 = Color3.fromRGB(11, 15, 22)
+    label.TextColor3 = Color3.fromRGB(121, 235, 255)
+    label.TextStrokeTransparency = 0.35
+    label.Font = Enum.Font.GothamBold
+    label.TextScaled = true
+    label.Size = UDim2.fromScale(1, 1)
+    label.Text = "GROUND FRUIT\n" .. self:DisplayName(tool)
+    label.Parent = gui
+
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 8)
+    corner.Parent = label
+
+    local highlight = Instance.new("Highlight")
+    highlight.Name = "PuckAFK_GroundFruitHighlight"
+    highlight.Adornee = tool
+    highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+    highlight.FillColor = Color3.fromRGB(86, 216, 255)
+    highlight.FillTransparency = 0.72
+    highlight.OutlineColor = Color3.fromRGB(220, 250, 255)
+    highlight.OutlineTransparency = 0
+    highlight.Parent = playerGui
+
+    record = {Gui = gui, Label = label, Highlight = highlight}
+    self.ESP[tool] = record
+    return record
+end
+function FruitPickupService:VisualStep()
+    local _, _, root = char()
+    for tool in pairs(self.Items) do
+        if self:IsWorldFruit(tool) and self:Handle(tool) then
+            local record = self:EnsureESP(tool)
+            if record and record.Label then
+                local distance = root and math.floor((root.Position - self:Handle(tool).Position).Magnitude) or nil
+                record.Label.Text = "GROUND FRUIT\n" .. self:DisplayName(tool) .. (distance and (" · " .. tostring(distance) .. " studs") or "")
+            end
+        else
+            self:RemoveESP(tool)
+            if not tool.Parent or self:HeldByPlayer(tool) or not tool:IsDescendantOf(workspace) then self.Items[tool] = nil end
+        end
+    end
+    if not Config.GroundFruitESP then
+        for tool in pairs(self.ESP) do self:RemoveESP(tool) end
+    end
 end
 function FruitPickupService:Observe(instance)
-    if instance:IsA("Tool") and self:IsWorldFruit(instance) then self.Items[instance] = true end
+    if instance:IsA("Tool") and self:IsWorldFruit(instance) then
+        self.Items[instance] = true
+        self:EnsureESP(instance)
+    end
 end
 function FruitPickupService:ScanExisting()
     if self.ExistingScanDone or self.ExistingScanBusy or not Runtime.Running then return end
@@ -7315,7 +8319,7 @@ function FruitPickupService:Bind()
         connect(workspace.DescendantAdded, function(child) if child:IsA("Tool") then self:Observe(child) end end, self.Connections)
         for _, child in ipairs(workspace:GetChildren()) do self:Observe(child) end
     end
-    if Config.AutoCollectSpawnedFruits then self:ScanExisting() end
+    if Config.AutoCollectSpawnedFruits or Config.GroundFruitESP then self:ScanExisting() end
 end
 function FruitPickupService:Handle(tool)
     if not tool then return nil end
@@ -7344,7 +8348,10 @@ function FruitPickupService:Select(origin)
                 if not score or d < score then best, score = tool, d end
             end
         else
-            if not tool.Parent or not tool:IsDescendantOf(workspace) then self.Items[tool] = nil end
+            if not tool.Parent or self:HeldByPlayer(tool) or self:IsPlayerDropped(tool) or not tool:IsDescendantOf(workspace) then
+                self.Items[tool] = nil
+                self:RemoveESP(tool)
+            end
         end
     end
     return best
@@ -7387,18 +8394,59 @@ function FruitPickupService:Step(owner)
     local _, _, root = char()
     if not root then return false end
     local tool = self.Current
-    if not tool or not self:IsWorldFruit(tool) then
+    if tool and not self:IsWorldFruit(tool) then
+        -- Someone may have picked it up while we were travelling.  Stop the old route
+        -- immediately instead of continuing toward the last fruit/player position.
+        if Movement and Movement.RequestKey == "Fruit:" .. tostring(tool) then Movement:Cancel("Ground fruit is no longer on the ground") end
+        self:RemoveESP(tool)
+        self.Items[tool], self.Current = nil, nil
+        tool = nil
+    end
+    if not tool then
         tool = self:Select(root.Position)
         self.Current, self.Started = tool, os.clock()
     end
     if not tool then Runtime.FruitPickupStatus = "No natural fruit detected"; return false end
     local handle = self:Handle(tool)
     if not handle then self.Blocked[tool] = os.clock() + 15; self.Current = nil; return false end
-    Runtime.FruitPickupStatus = "Collecting " .. tool.Name .. " · " .. math.floor((root.Position - handle.Position).Magnitude) .. " studs"
-    state("COLLECT_FRUIT", tool.Name)
+
+    -- Re-check immediately before every movement write.  Equipped fruits live under
+    -- workspace.Characters, so this guard is what guarantees we never Tween/TP to a
+    -- player who is holding a Blox Fruit.
+    local holder = self:HeldByPlayer(tool)
+    if holder or not self:IsWorldFruit(tool) then
+        self:RemoveESP(tool)
+        self.Items[tool], self.Current = nil, nil
+        Movement:Cancel("Ignored player-held fruit")
+        Runtime.FruitPickupStatus = "Ignored held fruit" .. (holder and (" · " .. holder.Name) or "")
+        return false
+    end
+
+    local travelMode = Config.SpawnedFruitTravel == "Teleport" and "Teleport" or "Tween"
     local distance = (root.Position - handle.Position).Magnitude
-    Movement:GoTo(owner, CFrame.new(handle.Position + Vector3.new(0, 1.5, 0)), 2.5, true, "Fruit:" .. tostring(tool))
-    if distance <= 6 then
+    Runtime.FruitPickupStatus = travelMode .. " to " .. self:DisplayName(tool) .. " · " .. math.floor(distance) .. " studs"
+    state("COLLECT_FRUIT", self:DisplayName(tool))
+
+    if travelMode == "Teleport" then
+        Movement:Cancel("Ground fruit teleport")
+        if self:IsWorldFruit(tool) and self:HeldByPlayer(tool) == nil then
+            local destination = handle.Position + Vector3.new(0, 2.5, 0)
+            if Movement and Config.AvoidWater then destination = Movement:WaterSafePosition(destination) end
+            root.CFrame = CFrame.new(destination)
+            root.AssemblyLinearVelocity = Vector3.zero
+            root.AssemblyAngularVelocity = Vector3.zero
+            distance = (root.Position - handle.Position).Magnitude
+        else
+            self:RemoveESP(tool)
+            self.Items[tool], self.Current = nil, nil
+            Runtime.FruitPickupStatus = "Fruit was picked up before teleport · cancelled"
+            return false
+        end
+    else
+        Movement:GoTo(owner, CFrame.new(handle.Position + Vector3.new(0, 1.5, 0)), 2.5, true, "Fruit:" .. tostring(tool))
+    end
+
+    if distance <= 7 and self:IsWorldFruit(tool) and self:HeldByPlayer(tool) == nil then
         if type(firetouchinterest) == "function" then
             pcall(firetouchinterest, root, handle, 0); pcall(firetouchinterest, root, handle, 1)
         end
@@ -7421,7 +8469,9 @@ function FruitPickupService:Step(owner)
 end
 function FruitPickupService:Destroy()
     disconnectAll(self.Connections)
-    self.Items = setmetatable({}, {__mode = "k"}); self.Blocked = setmetatable({}, {__mode = "k"}); self.Current = nil; self.PendingStore = nil; self.Bound = false
+    for tool in pairs(self.ESP) do self:RemoveESP(tool) end
+    self.Items = setmetatable({}, {__mode = "k"}); self.Blocked = setmetatable({}, {__mode = "k"}); self.ESP = setmetatable({}, {__mode = "k"})
+    self.Current = nil; self.PendingStore = nil; self.Bound = false
     self.ExistingScanDone, self.ExistingScanBusy = false, false
 end
 
@@ -7465,51 +8515,305 @@ function FruitGachaService:TryRoll(manual)
 end
 function FruitGachaService:Step() if Config.AutoRandomFruit then self:TryRoll(false) end end
 
-FruitShopService = {Next = 0, Buying = false, Stock = {}, Display = {}, DisplayToInternal = {}}
-function FruitShopService:Refresh(force)
-    if (not force and os.clock() < self.Next) or RemoteService.Busy then return false end
-    self.Next = os.clock() + (force and 2 or 15)
-    local advanced = Config.FruitDealer == "Advanced"
-    Runtime.FruitShopStatus = "Refreshing " .. string.lower(Config.FruitDealer) .. " dealer stock…"
-    return RemoteService:Call("FruitStock", force and 1 or 10, {"GetFruits", advanced}, function(ok, result)
-        if not ok or type(result) ~= "table" then Runtime.FruitShopStatus = "GetFruits failed"; return end
-        self.Stock, self.Display, self.DisplayToInternal = result, {}, {}
-        for _, item in ipairs(result) do
-            if type(item) == "table" and type(item.Name) == "string" then
-                local display = prettyFruitName(item.Name)
-                if self.DisplayToInternal[display] then display = display .. " [" .. item.Name .. "]" end
-                self.DisplayToInternal[display] = item.Name; table.insert(self.Display, display)
-            end
+FruitShopService = {
+    Next = 0, Buying = false,
+    Stock = {}, Display = {}, DisplayToInternal = {},
+    DealerStocks = {Normal = {}, Advanced = {}},
+    DealerDisplay = {Normal = {}, Advanced = {}},
+    DealerMaps = {Normal = {}, Advanced = {}},
+    DealerStatus = {Normal = "Not checked", Advanced = "Not checked"},
+    DealerLocationCache = {},
+    TravelDealer = nil, TravelGoal = nil, TravelStarted = 0,
+}
+
+local FRUIT_DEALER_NAME_HINTS = {
+    Normal = {"blox fruit dealer", "fruit dealer"},
+    Advanced = {"advanced fruit dealer", "advanced blox fruit dealer"},
+}
+
+local function moneyText(amount)
+    amount = math.floor(tonumber(amount) or 0)
+    local sign = amount < 0 and "-" or ""
+    local digits = tostring(math.abs(amount))
+    local parts = {}
+    while #digits > 3 do
+        table.insert(parts, 1, digits:sub(-3))
+        digits = digits:sub(1, -4)
+    end
+    table.insert(parts, 1, digits)
+    return "$" .. sign .. table.concat(parts, ",")
+end
+
+function FruitShopService:IsInStock(item)
+    return type(item) == "table" and item.Offsale ~= true and item.OnSale ~= false
+end
+
+function FruitShopService:DealerMatches(object, dealer)
+    if not object then return false end
+    local name = string.lower(tostring(object:GetAttribute("DisplayName") or object.Name or ""))
+    if name == "" or name:find("gacha", 1, true) or name:find("zioles", 1, true) then return false end
+    local advanced = name:find("advanced", 1, true) ~= nil
+    if dealer == "Advanced" then
+        return advanced and name:find("fruit", 1, true) and name:find("dealer", 1, true)
+    end
+    return not advanced and name:find("fruit", 1, true) and name:find("dealer", 1, true)
+end
+
+function FruitShopService:FindDealerPosition(dealer, origin, force)
+    dealer = dealer == "Advanced" and "Advanced" or "Normal"
+    origin = origin or (select(3, char()) and select(3, char()).Position) or Vector3.zero
+    local now = os.clock()
+    local cached = self.DealerLocationCache[dealer]
+    if not force and cached and now < (cached.Until or 0) then
+        return cached.Position, cached.Name
+    end
+
+    local best, bestName, bestDistance
+    local function consider(object)
+        if not (object:IsA("Model") or object:IsA("BasePart")) or not self:DealerMatches(object, dealer) then return end
+        local p = pos(object)
+        if not p then return end
+        local d = (p - origin).Magnitude
+        if not bestDistance or d < bestDistance then
+            best, bestName, bestDistance = p, tostring(object:GetAttribute("DisplayName") or object.Name), d
         end
-        table.sort(self.Display)
-        Runtime.FruitShopStatus = string.format("%s dealer · %d fruits loaded", Config.FruitDealer, #self.Display)
+    end
+
+    -- Prefer the live NPC folder. A wider workspace scan is only used for a
+    -- manual/forced lookup so periodic stock refreshes stay cheap.
+    local npcFolder = workspace:FindFirstChild("NPCs")
+    if npcFolder then
+        for _, object in ipairs(npcFolder:GetDescendants()) do consider(object) end
+        for _, object in ipairs(npcFolder:GetChildren()) do consider(object) end
+    end
+    if force and not best then
+        local ok, descendants = pcall(workspace.GetDescendants, workspace)
+        if ok and descendants then
+            for _, object in ipairs(descendants) do consider(object) end
+        end
+    end
+
+    if best then
+        self.DealerLocationCache[dealer] = {Position = best, Name = bestName, Until = now + 8}
+        return best, bestName
+    end
+    self.DealerLocationCache[dealer] = {Position = nil, Name = nil, Until = now + 3}
+    return nil, nil
+end
+
+function FruitShopService:DealerWhere(dealer, force)
+    local _, _, root = char()
+    local p, name = self:FindDealerPosition(dealer, root and root.Position or Vector3.zero, force)
+    if p then
+        return string.format("%s · %s · X %.0f, Y %.0f, Z %.0f", tostring(Runtime.Sea or "Unknown sea"), tostring(name or (dealer .. " Fruit Dealer")), p.X, p.Y, p.Z)
+    end
+    if dealer == "Advanced" then
+        return tostring(Runtime.Sea or "Unknown sea") .. " · Advanced dealer NPC is not currently loaded/spawned on this client"
+    end
+    return tostring(Runtime.Sea or "Unknown sea") .. " · no live normal dealer NPC is currently streamed nearby"
+end
+
+function FruitShopService:UseDealer(dealer)
+    dealer = dealer == "Advanced" and "Advanced" or "Normal"
+    self.Stock = self.DealerStocks[dealer] or {}
+    self.Display = self.DealerDisplay[dealer] or {}
+    self.DisplayToInternal = self.DealerMaps[dealer] or {}
+end
+
+function FruitShopService:BuildDealerData(dealer, result)
+    local display, mapping, inStock = {}, {}, {}
+    for _, item in ipairs(result or {}) do
+        if type(item) == "table" and type(item.Name) == "string" and self:IsInStock(item) then
+            local pretty = prettyFruitName(item.Name)
+            local price = tonumber(item.Price) or 0
+            local label = pretty .. (price > 0 and (" · " .. moneyText(price)) or "")
+            if mapping[label] then label = label .. " [" .. item.Name .. "]" end
+            mapping[label] = item.Name
+            table.insert(display, label)
+            table.insert(inStock, {Name = pretty, Internal = item.Name, Price = price})
+        end
+    end
+    table.sort(display)
+    table.sort(inStock, function(a, b)
+        if a.Price == b.Price then return a.Name < b.Name end
+        return a.Price < b.Price
+    end)
+    self.DealerStocks[dealer] = result or {}
+    self.DealerDisplay[dealer] = display
+    self.DealerMaps[dealer] = mapping
+    if dealer == Config.FruitDealer then self:UseDealer(dealer) end
+    return inStock
+end
+
+function FruitShopService:RefreshDealer(dealer, force, onDone)
+    dealer = dealer == "Advanced" and "Advanced" or "Normal"
+    if RemoteService.Busy then return false end
+    local advanced = dealer == "Advanced"
+    self.DealerStatus[dealer] = "Refreshing stock…"
+    if dealer == Config.FruitDealer then Runtime.FruitShopStatus = "Refreshing " .. string.lower(dealer) .. " dealer stock…" end
+    local label = "FruitStock" .. dealer
+    return RemoteService:Call(label, force and 0.5 or 8, {"GetFruits", advanced}, function(ok, result)
+        if not ok or type(result) ~= "table" then
+            self.DealerStatus[dealer] = "Stock request failed: " .. tostring(result)
+            if dealer == Config.FruitDealer then Runtime.FruitShopStatus = self.DealerStatus[dealer] end
+            if onDone then onDone(false) end
+            return
+        end
+        local inStock = self:BuildDealerData(dealer, result)
+        local where = self:DealerWhere(dealer, force == true)
+        self.DealerStatus[dealer] = string.format("%d in stock · %s", #inStock, where)
+        if dealer == Config.FruitDealer then
+            Runtime.FruitShopStatus = string.format("%s dealer · %d fruits in stock", dealer, #inStock)
+        end
+        if onDone then onDone(true) end
+    end, {GenerationBound = false, Timeout = 10})
+end
+
+function FruitShopService:Refresh(force)
+    if not force and os.clock() < self.Next then return false end
+    self.Next = os.clock() + (force and 2 or 15)
+    return self:RefreshDealer(Config.FruitDealer, force)
+end
+
+function FruitShopService:RefreshAll(force)
+    if RemoteService.Busy or Runtime.Workers.FruitStockAll then return false end
+    self.Next = os.clock() + (force and 2 or 15)
+    return worker("FruitStockAll", function()
+        local done = false
+        local started = self:RefreshDealer("Normal", force, function() done = true end)
+        if started then
+            local deadline = os.clock() + 12
+            while Runtime.Running and not done and os.clock() < deadline do task.wait(0.05) end
+        end
+        task.wait(0.1)
+        done = false
+        started = self:RefreshDealer("Advanced", force, function() done = true end)
+        if started then
+            local deadline = os.clock() + 12
+            while Runtime.Running and not done and os.clock() < deadline do task.wait(0.05) end
+        end
+        self:UseDealer(Config.FruitDealer)
     end)
 end
+
 function FruitShopService:SelectedEntry()
     local wanted = self.DisplayToInternal[Config.StockFruit]
+    if not wanted then
+        -- Keep compatibility with older saved configs that stored only the pretty name.
+        for label, internal in pairs(self.DisplayToInternal) do
+            if label == Config.StockFruit or label:sub(1, #tostring(Config.StockFruit)) == tostring(Config.StockFruit) then wanted = internal; break end
+        end
+    end
     if not wanted then return nil end
     for _, item in ipairs(self.Stock) do if type(item) == "table" and item.Name == wanted then return item end end
 end
+
+function FruitShopService:SelectedText()
+    local entry = self:SelectedEntry()
+    if not entry then return "Select an in-stock fruit to see its price and dealer." end
+    local dealer = Config.FruitDealer == "Advanced" and "Advanced" or "Normal"
+    local stock = self:IsInStock(entry) and "IN STOCK" or "OUT OF STOCK"
+    return string.format("%s · %s\nPrice: %s · You have %s\nDealer: %s", prettyFruitName(entry.Name), stock, moneyText(entry.Price), moneyText(beli()), self:DealerWhere(dealer, false))
+end
+
+function FruitShopService:StockText()
+    local lines = {}
+    for _, dealer in ipairs({"Normal", "Advanced"}) do
+        local items = {}
+        local stock = self.DealerStocks[dealer] or {}
+        for _, item in ipairs(stock) do
+            if self:IsInStock(item) and type(item.Name) == "string" then
+                table.insert(items, prettyFruitName(item.Name) .. (tonumber(item.Price) and (" " .. moneyText(item.Price)) or ""))
+            end
+        end
+        table.sort(items)
+        local list = #items > 0 and table.concat(items, " · ") or "No in-stock fruit data yet"
+        table.insert(lines, dealer .. ": " .. list)
+        table.insert(lines, "Status: " .. tostring(self.DealerStatus[dealer] or "Not checked"))
+        table.insert(lines, "Where: " .. self:DealerWhere(dealer, false))
+    end
+    return table.concat(lines, "\n")
+end
+
+function FruitShopService:HasTravelWork()
+    return self.TravelDealer ~= nil and self.TravelGoal ~= nil
+end
+
+function FruitShopService:CancelTravel(reason)
+    self.TravelDealer, self.TravelGoal, self.TravelStarted = nil, nil, 0
+    if Movement and Runtime.Owner == "Shop" then Movement:Cancel(reason or "Fruit dealer travel stopped") end
+end
+
+function FruitShopService:BeginDealerTravel(dealer)
+    dealer = dealer == "Advanced" and "Advanced" or "Normal"
+    local _, _, root = char()
+    if not root then Runtime.FruitShopStatus = "Waiting for character before dealer travel"; return false end
+    local goal, name = self:FindDealerPosition(dealer, root.Position, true)
+    if not goal then
+        Runtime.FruitShopStatus = dealer .. " dealer is not currently loaded/spawned here; cannot safely travel to an invented coordinate"
+        return false
+    end
+    self.TravelDealer, self.TravelGoal, self.TravelStarted = dealer, goal, os.clock()
+    Runtime.FruitShopStatus = string.format("Going to %s · %.0f studs", tostring(name or (dealer .. " Fruit Dealer")), (goal - root.Position).Magnitude)
+    return true
+end
+
+function FruitShopService:TravelStep(root)
+    if not self:HasTravelWork() or not root then return false end
+    local dealer, goal = self.TravelDealer, self.TravelGoal
+    local live = self:FindDealerPosition(dealer, root.Position, false)
+    if live then goal = live; self.TravelGoal = live end
+    local distance = (goal - root.Position).Magnitude
+    if distance <= 10 then
+        Movement:Cancel("Reached fruit dealer")
+        Runtime.FruitShopStatus = dealer .. " dealer reached · choose an in-stock fruit or press Buy selected fruit"
+        self.TravelDealer, self.TravelGoal, self.TravelStarted = nil, nil, 0
+        return true
+    end
+    if os.clock() - self.TravelStarted > 75 then
+        Runtime.FruitShopStatus = dealer .. " dealer travel timed out; rescan and try again"
+        self:CancelTravel("Dealer travel timed out")
+        return false
+    end
+    state("SHOP_TRAVEL", dealer .. " Fruit Dealer · " .. math.floor(distance) .. " studs")
+    Movement:GoTo("Shop", CFrame.new(goal + Vector3.new(0, 2, 0)), 8, true, "FruitDealer:" .. dealer)
+    return true
+end
+
 function FruitShopService:BuySelected(manual)
     if self.Buying or RemoteService.Busy then return false end
-    if Config.StockFruit == "Select fruit" then Runtime.FruitShopStatus = "Select a fruit first"; return false end
+    if Config.StockFruit == "Select fruit" then Runtime.FruitShopStatus = "Select an in-stock fruit first"; return false end
+    self:UseDealer(Config.FruitDealer)
     local entry = self:SelectedEntry()
-    if not entry then self:Refresh(true); Runtime.FruitShopStatus = "Refreshing stock before purchase…"; return false end
-    if entry.Offsale == true or entry.OnSale == false then Runtime.FruitShopStatus = Config.StockFruit .. " is not currently in stock"; return false end
+    if not entry then self:Refresh(true); Runtime.FruitShopStatus = "Refreshing selected dealer stock before purchase…"; return false end
+    if not self:IsInStock(entry) then Runtime.FruitShopStatus = Config.StockFruit .. " is not currently in stock"; return false end
     local price = tonumber(entry.Price) or 0
-    if beli() < price + math.max(0, Config.FruitMoneyReserve) then Runtime.FruitShopStatus = string.format("Need $%s plus $%s reserve", tostring(price), tostring(Config.FruitMoneyReserve)); return false end
+    if beli() < price + math.max(0, Config.FruitMoneyReserve) then Runtime.FruitShopStatus = string.format("Need %s plus %s reserve", moneyText(price), moneyText(Config.FruitMoneyReserve)); return false end
     local args = {"PurchaseRawFruit", entry.Name, Config.FruitDealer == "Advanced"}
     if entry.Name == "Dragon-Dragon" then table.insert(args, Config.DragonType) end
-    self.Buying = true; Runtime.FruitShopStatus = "Buying " .. Config.StockFruit .. "…"
+    self.Buying = true; Runtime.FruitShopStatus = "Buying " .. prettyFruitName(entry.Name) .. "…"
     return RemoteService:Call("FruitBuy", 3, args, function(ok, result)
         self.Buying = false
         if ok and result then
-            Runtime.Counters.Purchases += 1; Runtime.FruitShopStatus = "Purchased " .. Config.StockFruit .. " with Beli"; notify("Purchased fruit: " .. Config.StockFruit)
+            Runtime.Counters.Purchases += 1; Runtime.FruitShopStatus = "Purchased " .. prettyFruitName(entry.Name) .. " with Beli"; notify("Purchased fruit: " .. prettyFruitName(entry.Name))
             if Config.AutoBuyStockFruit then Config.AutoBuyStockFruit = false; if Runtime.Controls and Runtime.Controls.AutoBuyStockFruit then Runtime.Controls.AutoBuyStockFruit:Set(false) end end
+            self.Next = 0
         else Runtime.FruitShopStatus = "Purchase failed or fruit left stock"; self.Next = 0 end
-    end)
+    end, {GenerationBound = false, Timeout = 10})
 end
-function FruitShopService:Step() self:Refresh(false); if Config.AutoBuyStockFruit then self:BuySelected(false) end end
+function FruitShopService:Step()
+    self:UseDealer(Config.FruitDealer)
+    -- GetFruits was the dominant CommF_ call in the supplied capture. Keep farm-critical
+    -- quest/stat/aura traffic responsive by deferring passive stock polls while a combat
+    -- farm owns movement. Manual refresh and AutoBuyStockFruit still bypass this deferral.
+    local farming = Config.AutoBoss or Config.AutoEnemy or Config.AutoLevel
+    if not farming or Config.AutoBuyStockFruit then
+        self:Refresh(false)
+    else
+        self.Next = math.max(self.Next or 0, os.clock() + 3)
+    end
+    if Config.AutoBuyStockFruit then self:BuySelected(false) end
+end
 
 local SHOP_WEAPONS = {"Slingshot", "Musket", "Flintlock", "Refined Slingshot", "Dual Flintlock", "Cannon", "Katana", "Cutlass", "Dual Katana", "Iron Mace", "Triple Katana", "Pipe", "Dual-Headed Blade", "Bisento"}
 
@@ -7557,6 +8861,36 @@ local HAKI_PROFILES = {
     ["Instinct"] = {Teacher = "Instinct Teacher", Money = 750000, Instinct = true, Label = "Instinct"},
 }
 local HAKI_NAMES = {"Aura", "Air Jump", "Flash Step", "Instinct"}
+
+
+local STYLE_REQUIREMENT_HINTS = {
+    ["Dark Step"] = "Currency only once the Dark Step Teacher is reachable.",
+    ["Electric"] = "Electric research state is checked by the server. If required, complete the Lightning Bolt prerequisite before the purchase probe can pass.",
+    ["Water Kung-fu"] = "The server's Fishman Karate access gate must be open before purchase.",
+    ["Dragon Breath"] = "Requires the Sabi/Dragon Claw reward state plus the fragment cost.",
+    ["Superhuman"] = "Requires the prerequisite fighting-style mastery state. The server probe is authoritative.",
+    ["Death Step"] = "Requires the Death Step mastery/access prerequisites in addition to Beli and fragments. The server probe is authoritative.",
+    ["Sharkman Karate"] = "Requires the Sharkman Karate mastery/access state; Water Key progression may be required. The server probe is authoritative.",
+    ["Electric Claw"] = "Requires the Electric Claw mastery state and Mansion challenge progression. The server probe is authoritative.",
+    ["Dragon Talon"] = "Requires Dragon Talon progression; Fire Essence may be required. The server probe is authoritative.",
+    ["Godhuman"] = "Requires the game's Godhuman mastery/material progression in addition to Beli and fragments. The server probe is authoritative.",
+    ["Sanguine Art"] = "Requires the game's Sanguine Art progression in addition to Beli and fragments. The server probe is authoritative.",
+}
+local HAKI_REQUIREMENT_HINTS = {
+    ["Aura"] = "Ability Teacher purchase; Beli is checked locally before the server request.",
+    ["Air Jump"] = "Ability Teacher purchase; Beli is checked locally before the server request.",
+    ["Flash Step"] = "Ability Teacher purchase; Beli is checked locally before the server request.",
+    ["Instinct"] = "Instinct Teacher eligibility is checked with KenTalk before spending. A nil teacher response is treated as an unavailable/unfinished check, not proof that prerequisites are missing.",
+}
+local STYLE_TOOL_ALIASES = {
+    ["Dark Step"] = {"Black Leg", "Dark Step"},
+    ["Electric"] = {"Electro", "Electric"},
+    ["Water Kung-fu"] = {"Fishman Karate", "Water Kung-fu", "Water Kung Fu"},
+    ["Dragon Breath"] = {"Dragon Claw", "Dragon Breath"},
+    ["Superhuman"] = {"Superhuman"}, ["Death Step"] = {"Death Step"},
+    ["Sharkman Karate"] = {"Sharkman Karate"}, ["Electric Claw"] = {"Electric Claw"},
+    ["Dragon Talon"] = {"Dragon Talon"}, ["Godhuman"] = {"Godhuman"}, ["Sanguine Art"] = {"Sanguine Art"},
+}
 
 local function fragments()
     local data = Player and Player:FindFirstChild("Data")
@@ -8040,11 +9374,14 @@ function PurchaseService:BuyHaki(manual, skipTeacherTravel)
                 Runtime.PurchaseStatus = "Instinct Teacher did not answer: " .. tostring(stateValue)
                 self.NextHaki = os.clock() + 4; self.HakiPhase = "Retry"; return
             end
-            if stateValue == 0 then
+            if stateValue == nil then
+                Runtime.PurchaseStatus = "Instinct Teacher returned no eligibility state; not treating this as a failed prerequisite. Staying nearby and retrying."
+                self.HakiPhase = "Retry"; self.NextHaki = os.clock() + 3; return
+            elseif stateValue == 0 then
                 Runtime.PurchaseStatus = "Instinct is already learned"
                 self.HakiPhase = "Ready"; self:StopToggle("AutoBuyHaki"); return
             elseif stateValue ~= 1 then
-                Runtime.PurchaseStatus = "Instinct prerequisites are not met yet · teacher state " .. tostring(stateValue)
+                Runtime.PurchaseStatus = "Instinct eligibility is not ready · teacher state " .. tostring(stateValue) .. " · see readiness panel for local requirements"
                 self.HakiPhase = "Waiting"; self.NextHaki = os.clock() + 10; return
             end
             self.HakiPhase = "Buy"
@@ -8086,6 +9423,64 @@ function PurchaseService:BuyHaki(manual, skipTeacherTravel)
     return started
 end
 
+
+function PurchaseService:VisibleStyleMastery(style)
+    local aliases = STYLE_TOOL_ALIASES[style] or {style}
+    for _, container in ipairs({Player and Player.Character or false, Player and Player:FindFirstChildOfClass("Backpack") or false}) do
+        if container then
+            for _, alias in ipairs(aliases) do
+                local tool = container:FindFirstChild(alias)
+                if tool and tool:IsA("Tool") then
+                    local level = tool:GetAttribute("Level")
+                    if type(level) ~= "number" then
+                        local node = tool:FindFirstChild("Level")
+                        if node and node:IsA("ValueBase") then level = tonumber(node.Value) end
+                    end
+                    return tonumber(level), tool.Name
+                end
+            end
+        end
+    end
+    return nil, nil
+end
+
+function PurchaseService:RequirementsText()
+    local data = Player and Player:FindFirstChild("Data")
+    local level = tonumber(value(data, "Level", 0)) or 0
+    local lines = {
+        string.format("Balances: %s Beli · %s fragments · Level %d", moneyText(beli()), tostring(fragments()), level),
+    }
+
+    local style = Config.FightingStyle
+    local profile = STYLE_PROFILES[style]
+    if profile then
+        local checks = {}
+        if profile.Money then table.insert(checks, string.format("Beli %s/%s %s", moneyText(beli()), moneyText(profile.Money), beli() >= profile.Money and "✓" or "✗")) end
+        if profile.Fragments then table.insert(checks, string.format("Fragments %s/%s %s", tostring(fragments()), tostring(profile.Fragments), fragments() >= profile.Fragments and "✓" or "✗")) end
+        local mastery, toolName = self:VisibleStyleMastery(style)
+        if mastery then table.insert(checks, "Visible mastery " .. tostring(math.floor(mastery)) .. " (" .. tostring(toolName) .. ")")
+        else table.insert(checks, "Mastery: selected style not currently replicated as a Tool") end
+        table.insert(lines, "Style: " .. style .. " · " .. table.concat(checks, " · "))
+        table.insert(lines, "Teacher: " .. tostring(STYLE_TEACHERS[style] or "Unknown") .. " · " .. tostring(STYLE_REQUIREMENT_HINTS[style] or "Server eligibility probe is authoritative."))
+    end
+
+    local ability = Config.HakiAbility
+    local haki = HAKI_PROFILES[ability]
+    if haki then
+        local moneyReady = not haki.Money or beli() >= haki.Money
+        table.insert(lines, string.format("Ability: %s · Beli %s/%s %s", ability, moneyText(beli()), moneyText(haki.Money or 0), moneyReady and "✓" or "✗"))
+        table.insert(lines, "Teacher: " .. tostring(haki.Teacher or "Unknown") .. " · " .. tostring(HAKI_REQUIREMENT_HINTS[ability] or "Server eligibility check is authoritative."))
+    end
+
+    table.insert(lines, "Latest server purchase state: " .. tostring(Runtime.PurchaseStatus or "Idle"))
+    return table.concat(lines, "\n")
+end
+
+function PurchaseService:ResetTravel(reason)
+    self.TravelStyle, self.TravelAbility, self.TravelGoal, self.TravelStage, self.TravelManual = nil, nil, nil, nil, false
+    if Movement and Runtime.Owner == "Shop" then Movement:Cancel(reason or "Purchase travel stopped") end
+end
+
 function PurchaseService:Step()
     if Config.AutoBuyWeapon then self:BuyWeapon(false) end
     if Config.AutoBuyStyle and not self:HasTravelWork() then self:BuyStyle(false) end
@@ -8094,8 +9489,385 @@ end
 
 -- Item-NPC, accessories, trinkets, enchants and Auto Best Gear were removed in v1.6.7.
 
+
+-- Level 700 First Sea -> Second Sea progression.
+-- The supplied Cobalt capture verifies DressrosaQuestProgress returns
+-- {TalkedDetective, UsedKey, KilledIceBoss}.  The progression actions below
+-- deliberately use the game's own CommF_ quest/travel commands and the normal
+-- PuckAFK movement/combat stack; no server-only state is fabricated.
+local SEA2_DETECTIVE_FALLBACK = Vector3.new(4849.29883, 5.65138149, 719.611877)
+local SEA2_ICE_DOOR = Vector3.new(1347.7124, 37.3751602, -1325.6488)
+
+SeaProgressionService = {
+    Progress = nil,
+    NextProbe = 0,
+    PendingProbe = false,
+    NextAction = 0,
+    NextDoorTouch = 0,
+    DoorAttempts = 0,
+    LastPhase = "Idle",
+}
+
+function SeaProgressionService:SetStatus(status)
+    self.LastPhase = tostring(status or "Idle")
+    Runtime.SeaProgressStatus = self.LastPhase
+end
+
+function SeaProgressionService:Reset(reason)
+    self.Progress = nil
+    self.NextProbe = 0
+    self.PendingProbe = false
+    self.NextAction = 0
+    self.NextDoorTouch = 0
+    self.DoorAttempts = 0
+    self:SetStatus(reason or "Waiting for Level 700 progression")
+end
+
+function SeaProgressionService:FindNPCPosition(names, origin)
+    local wanted = {}
+    for _, name in ipairs(names or {}) do wanted[string.lower(name)] = true end
+    local best, bestDistance
+    for _, folder in ipairs({workspace:FindFirstChild("NPCs"), RS:FindFirstChild("NPCs")}) do
+        if folder then
+            for _, npc in ipairs(folder:GetDescendants()) do
+                if npc:IsA("Model") or npc:IsA("BasePart") then
+                    local lower = string.lower(tostring(npc.Name))
+                    local matches = wanted[lower]
+                    if not matches then
+                        for name in pairs(wanted) do
+                            if lower:find(name, 1, true) then matches = true; break end
+                        end
+                    end
+                    if matches then
+                        local p = pos(npc)
+                        if p then
+                            local d = typeof(origin) == "Vector3" and (p - origin).Magnitude or 0
+                            if not bestDistance or d < bestDistance then best, bestDistance = p, d end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return best
+end
+
+function SeaProgressionService:FindTool(name)
+    local character = Player and Player.Character
+    local backpack = Player and Player:FindFirstChildOfClass("Backpack")
+    return (character and character:FindFirstChild(name)) or (backpack and backpack:FindFirstChild(name))
+end
+
+function SeaProgressionService:EquipTool(tool)
+    if not tool or not tool:IsA("Tool") then return false end
+    local character, humanoid = char()
+    if not character or not humanoid then return false end
+    if tool.Parent ~= character then
+        Combat:Stop()
+        pcall(humanoid.EquipTool, humanoid, tool)
+        return false
+    end
+    return true
+end
+
+function SeaProgressionService:IceDoorPart()
+    local door = path(workspace, "Map", "Ice", "Door")
+    if not door then return nil end
+    if door:IsA("BasePart") then return door end
+
+    -- Prefer the visible/collidable slab when Door is a Model.  The hard-coded
+    -- CFrame used by older hubs points at the centre of this slab; that centre
+    -- is unreachable while CanCollide is true, which is exactly the stall fixed
+    -- in v1.6.24.
+    local best, bestScore
+    for _, object in ipairs(door:GetDescendants()) do
+        if object:IsA("BasePart") then
+            local score = object.Size.X * object.Size.Y * object.Size.Z
+            if object.CanCollide then score = score * 4 end
+            if object.Transparency < 0.95 then score = score * 2 end
+            if not bestScore or score > bestScore then
+                best, bestScore = object, score
+            end
+        end
+    end
+    return best
+end
+
+function SeaProgressionService:IceDoorOpen()
+    local part = self:IceDoorPart()
+    return part and (part.CanCollide == false or part.Transparency >= 0.95) or false
+end
+
+function SeaProgressionService:DoorSurface(part, fromPosition)
+    if not part or not part:IsA("BasePart") or typeof(fromPosition) ~= "Vector3" then
+        return SEA2_ICE_DOOR, math.huge
+    end
+
+    -- Closest point on the live door OBB to the character.  Unlike aiming at
+    -- part.Position, this remains reachable while the door is collidable.
+    local localPoint = part.CFrame:PointToObjectSpace(fromPosition)
+    local half = part.Size * 0.5
+    local clamped = Vector3.new(
+        math.clamp(localPoint.X, -half.X, half.X),
+        math.clamp(localPoint.Y, -half.Y, half.Y),
+        math.clamp(localPoint.Z, -half.Z, half.Z)
+    )
+    local surface = part.CFrame:PointToWorldSpace(clamped)
+    return surface, (fromPosition - surface).Magnitude
+end
+
+function SeaProgressionService:DoorApproachCFrame(part, rootPosition)
+    local surface = self:DoorSurface(part, rootPosition)
+    local away = rootPosition - surface
+    if away.Magnitude < 0.05 then
+        away = -part.CFrame.LookVector
+    end
+    -- Stand just outside the slab.  This gives the Key handle room to contact
+    -- it while avoiding the impossible request to place HRP inside the wall.
+    local goal = surface + away.Unit * 2.25 + Vector3.new(0, 0.75, 0)
+    return CFrame.lookAt(goal, surface)
+end
+
+function SeaProgressionService:PulseIceDoor(key, doorPart, root)
+    local now = os.clock()
+    if now < (self.NextDoorTouch or 0) then return false end
+    self.NextDoorTouch = now + 0.55
+    self.DoorAttempts = (self.DoorAttempts or 0) + 1
+
+    local character = Player and Player.Character
+    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+    if not character or not humanoid or not key or not doorPart or not root then return false end
+    if key.Parent ~= character then
+        pcall(humanoid.EquipTool, humanoid, key)
+        return false
+    end
+
+    local handle = key:FindFirstChild("Handle") or key:FindFirstChildWhichIsA("BasePart")
+    if type(firetouchinterest) == "function" then
+        if handle then
+            pcall(firetouchinterest, handle, doorPart, 0)
+            pcall(firetouchinterest, handle, doorPart, 1)
+        end
+        pcall(firetouchinterest, root, doorPart, 0)
+        pcall(firetouchinterest, root, doorPart, 1)
+    end
+
+    -- Some current client builds only complete the Key's local activation path
+    -- after an M1. Pulse Tool:Activate AND one real input; don't treat a
+    -- non-erroring Tool:Activate call as proof the door accepted the Key.
+    pcall(key.Activate, key)
+    local clicked = false
+    if IS_REAL and executorWindowActive() and type(mouse1click) == "function" then
+        clicked = pcall(mouse1click)
+    end
+    if not clicked then
+        local okVIM, vim = pcall(game.GetService, game, "VirtualInputManager")
+        if okVIM and vim then
+            local camera = workspace.CurrentCamera
+            local size = camera and camera.ViewportSize or Vector2.new(1280, 720)
+            local x, y = math.floor(size.X * 0.5), math.floor(size.Y * 0.5)
+            clicked = pcall(function()
+                vim:SendMouseButtonEvent(x, y, 0, true, game, 0)
+                task.wait(0.03)
+                vim:SendMouseButtonEvent(x, y, 0, false, game, 0)
+            end)
+        end
+    end
+
+    self:SetStatus("Opening Ice Door · Key contact attempt " .. tostring(self.DoorAttempts))
+    return true
+end
+
+function SeaProgressionService:Probe(force)
+    local now = os.clock()
+    if self.PendingProbe or RemoteService.Busy or (not force and now < self.NextProbe) then return false end
+    self.PendingProbe = true
+    self.NextProbe = now + 1.25
+    local started = RemoteService:Call("Sea2Progress", 0.75, {"DressrosaQuestProgress"}, function(ok, result)
+        self.PendingProbe = false
+        if ok and type(result) == "table" then
+            self.Progress = result
+            self:SetStatus(string.format(
+                "Second Sea · Detective %s · Key %s · Ice Admiral %s",
+                result.TalkedDetective and "✓" or "…",
+                result.UsedKey and "✓" or "…",
+                result.KilledIceBoss and "✓" or "…"
+            ))
+        else
+            self.NextProbe = os.clock() + 1.5
+            self:SetStatus("Second Sea · waiting for progression status")
+        end
+    end, {GenerationBound = false, Timeout = 8})
+    if not started then self.PendingProbe = false end
+    return started
+end
+
+function SeaProgressionService:TalkDetective(root)
+    local detective = self:FindNPCPosition({"Military Detective", "Detective"}, root.Position) or SEA2_DETECTIVE_FALLBACK
+    local distance = (detective - root.Position).Magnitude
+    if distance > 8 then
+        Combat:Stop(); Runtime.Target = nil
+        self:SetStatus("Level 700 · going to the Military Detective at Prison")
+        state("SEA2_DETECTIVE", "Going to the Military Detective · " .. math.floor(distance) .. " studs")
+        local goal = Movement:ApproachCFrame(detective, root.Position, 3, 1) or CFrame.new(detective + Vector3.new(0, 2, 0))
+        Movement:GoTo("Level", goal, 5, true, "Sea2:Detective")
+        return true
+    end
+
+    Movement:Cancel("At Military Detective")
+    Combat:Stop()
+    if os.clock() < self.NextAction or RemoteService.Busy then
+        state("SEA2_DETECTIVE", "Waiting for the Detective")
+        return true
+    end
+    self.NextAction = os.clock() + 1.5
+    self:SetStatus("Level 700 · asking the Military Detective for the Key")
+    RemoteService:Call("Sea2Detective", 1.0, {"DressrosaQuestProgress", "Detective"}, function(ok)
+        if ok then
+            self.Progress = nil
+            self.NextProbe = 0
+            self:SetStatus("Detective contacted · confirming Key")
+        else
+            self:SetStatus("Detective request failed · retrying")
+        end
+    end, {GenerationBound = false, Timeout = 8})
+    return true
+end
+
+function SeaProgressionService:OpenIceDoor(root)
+    local key = self:FindTool("Key")
+    if not key then
+        -- A death/reload can lose the physical Key even after the server recorded
+        -- the Detective step. Revisit him instead of getting stuck at the Ice Door.
+        self.DoorAttempts = 0
+        return self:TalkDetective(root)
+    end
+
+    self:EquipTool(key)
+    local doorPart = self:IceDoorPart()
+    if not doorPart then
+        -- Streaming can briefly hide Map.Ice.Door. Use the legacy coordinate only
+        -- to load the area; never wait for an impossible distance-to-centre.
+        local distance = (SEA2_ICE_DOOR - root.Position).Magnitude
+        Combat:Stop(); Runtime.Target = nil
+        self:SetStatus("Loading Ice Door · " .. math.floor(distance) .. " studs")
+        state("SEA2_ICE_DOOR", "Loading Ice Door")
+        Movement:GoTo("Level", CFrame.new(SEA2_ICE_DOOR + Vector3.new(0, 3, 0)), 6, true, "Sea2:LoadIceDoor")
+        return true
+    end
+
+    if self:IceDoorOpen() then
+        Movement:Cancel("Ice Door opened")
+        self.DoorAttempts = 0
+        self.NextProbe = 0
+        self:Probe(true)
+        return true
+    end
+
+    local surface, surfaceDistance = self:DoorSurface(doorPart, root.Position)
+    -- HRP cannot reach doorPart.Position while CanCollide is true. Trigger the
+    -- interaction once we are at the reachable front surface instead.
+    if surfaceDistance > 4.75 then
+        Combat:Stop(); Runtime.Target = nil
+        self:SetStatus("Key equipped · approaching Ice Door surface")
+        state("SEA2_ICE_DOOR", "Ice Door surface · " .. math.floor(surfaceDistance) .. " studs")
+        Movement:GoTo("Level", self:DoorApproachCFrame(doorPart, root.Position), 3.25, true, "Sea2:IceDoorSurface")
+        return true
+    end
+
+    Movement:Cancel("At Ice Door surface")
+    Combat:Stop(); Runtime.Target = nil
+    self:EquipTool(key)
+    state("SEA2_ICE_DOOR", "Opening Ice Door with Key")
+    self:PulseIceDoor(key, doorPart, root)
+
+    -- Keep validating both the physical door and server progression. If this
+    -- client missed the Detective acknowledgement, resending it while still
+    -- holding the Key is harmless and matches the game's normal quest route.
+    if (self.DoorAttempts or 0) > 0 and self.DoorAttempts % 5 == 0 and not RemoteService.Busy then
+        RemoteService:Call("Sea2DetectiveDoorSync", 2.5, {"DressrosaQuestProgress", "Detective"}, function()
+            self.Progress = nil
+            self.NextProbe = 0
+        end, {GenerationBound = false, Timeout = 8})
+    else
+        self.NextProbe = 0
+        self:Probe(true)
+    end
+    return true
+end
+
+function SeaProgressionService:TravelSecondSea()
+    Combat:Stop(); Movement:Cancel("Second Sea unlocked"); Runtime.Target = nil
+    self:SetStatus("Ice Admiral defeated · travelling to Second Sea")
+    state("SEA2_TRAVEL", "Unlock complete · travelling to Second Sea")
+    if os.clock() < self.NextAction or RemoteService.Busy then return true end
+    self.NextAction = os.clock() + 8
+    RemoteService:Call("Sea2Travel", 7, {"TravelDressrosa"}, function(ok, result)
+        if not ok then
+            self.NextAction = os.clock() + 2
+            self:SetStatus("Second Sea travel request failed · retrying")
+        else
+            self:SetStatus("Second Sea travel requested · waiting for teleport")
+        end
+    end, {GenerationBound = false, Timeout = 10})
+    return true
+end
+
+-- Returns handled=true when progression owns this controller tick.
+-- Returns a q table when the normal combat controller should kill Ice Admiral.
+function SeaProgressionService:Step(level, root)
+    if Config.AutoSeaProgression ~= true or Config.AutoLevel ~= true or Runtime.Sea ~= "Sea1" or tonumber(level) < 700 then
+        return false, nil
+    end
+    if not root then return true, nil end
+
+    self:Probe(false)
+    local progress = self.Progress
+    if type(progress) ~= "table" then
+        Combat:Stop(); Runtime.Target = nil
+        Movement:Cancel("Checking Second Sea progression")
+        self:SetStatus("Level 700 reached · checking Second Sea progression")
+        state("SEA2_CHECK", "Checking Detective / Key / Ice Admiral progress")
+        return true, nil
+    end
+
+    if progress.KilledIceBoss == true then
+        return self:TravelSecondSea(), nil
+    end
+
+    local key = self:FindTool("Key")
+    if progress.TalkedDetective ~= true and not key then
+        return self:TalkDetective(root), nil
+    end
+
+    local doorOpen = self:IceDoorOpen()
+    if progress.UsedKey ~= true and not doorOpen then
+        return self:OpenIceDoor(root), nil
+    end
+
+    self:SetStatus("Ice Door open · defeating Ice Admiral")
+    return false, {
+        Target = "Ice Admiral",
+        Boss = true,
+        SeaProgress = true,
+        Name = "Unlock Second Sea · Ice Admiral",
+    }
+end
+
 local Controller = {TargetName = nil, LastHealth = nil, DamageAt = 0, NoTargetAt = 0, RecoveryCount = 0, WaitAnchor = nil,
-    M1Target = nil, M1Confirmed = false, M1StartedAt = 0, M1AttemptAt = 0, M1AttemptHealth = nil}
+    M1Target = nil, M1Confirmed = false, M1StartedAt = 0, M1AttemptAt = 0, M1AttemptHealth = nil,
+    HybridKills = 0, HybridFruitLockedTarget = nil, HybridRecentHit = 0, HybridCurrentTarget = nil}
+function Controller:ResetHybrid(reason)
+    self.HybridKills = 0
+    self.HybridFruitLockedTarget = nil
+    self.HybridRecentHit = 0
+    self.HybridCurrentTarget = nil
+    Runtime.HybridMasteryStatus = Config.HybridMastery and "Target 1: strongest non-fruit full kill" or "Off"
+    if reason and Config.Debug then log("Hybrid", reason) end
+end
+function Controller:HybridFruitTurn()
+    return Config.HybridMastery == true and (self.HybridKills % 2 == 1)
+end
 function Controller:Recover(reason, blacklist)
     Runtime.LastRecovery = reason
     Runtime.Counters.Recoveries = Runtime.Counters.Recoveries + 1
@@ -8129,6 +9901,7 @@ function Controller:EnsureQuest(q, origin)
     end
     if QuestService:Matches(active, q) then
         QuestService.PendingUntil = 0; QuestService.PendingQuest = nil
+        if RegionService then RegionService:CheckpointForQuest(q.Id, origin) end
         return true
     end
     Combat:Stop()
@@ -8171,6 +9944,7 @@ function Controller:EnsureQuest(q, origin)
         return false
     end
     Movement:Cancel("At quest NPC")
+    if RegionService then RegionService:CheckpointForQuest(q.Id, origin) end
     state("START_QUEST", q.Id .. " · " .. q.Index)
     if RemoteService:Call("Quest", 3, {"StartQuest", q.Id, q.Index}, function(ok, response)
         if not ok or response ~= 0 then QuestService:Reject(q, "StartQuest returned " .. tostring(response)) end
@@ -8211,7 +9985,8 @@ function Controller:Step()
     if not Runtime.Sea then Movement:Cancel("Unknown realm"); Combat:Stop(); state("DETECT_WORLD", "Detecting current sea (PlaceId/Realm fallback)"); return end
     if owner == "Shop" then
         Combat:Stop(); Runtime.Target = nil
-        PurchaseService:TravelStep(r)
+        if FruitShopService and FruitShopService:HasTravelWork() then FruitShopService:TravelStep(r)
+        elseif PurchaseService then PurchaseService:TravelStep(r) end
         return
     end
     -- Spawned fruit collection shares the current farm movement owner so it can
@@ -8244,15 +10019,36 @@ function Controller:Step()
     WeaponService:Refresh()
     local q = Runtime.Quest
     local engaged = Runtime.Target and EnemyService:IsOurs(Runtime.Target) and EnemyService:Parts(Runtime.Target) ~= nil
+
+    -- At Level 700, ordinary Sea 1 quests are no longer the correct progression.
+    -- Give the Second Sea chain ownership before quest selection.  When the Ice
+    -- Door is open it hands back a synthetic Ice Admiral target so the exact
+    -- existing Auto Level combat loop performs the kill.
+    if owner == "Level" and SeaProgressionService then
+        local handled, progressionQuest = SeaProgressionService:Step(level, r)
+        if handled then
+            Runtime.Quest = progressionQuest
+            return
+        elseif progressionQuest then
+            if not q or not q.SeaProgress or q.Target ~= progressionQuest.Target then
+                Combat:Stop(); Runtime.Target = nil; self.LastHealth = nil
+                self.WaitAnchor, self.TargetName, self.NoTargetAt = nil, progressionQuest.Target, os.clock()
+            end
+            q = progressionQuest
+        end
+    end
+
     if owner == "Level" then
-        local failure = q and QuestService.Failures[q.Key]
-        local failed = failure and os.clock() < failure.Until
-        local changed = self.SelectionLevel ~= level or self.SelectionSea ~= Runtime.Sea
-        if not engaged and not QuestService.PendingQuest and (not q or failed or changed) then
-            if q or os.clock() >= (self.NextQuestChoice or 0) then
-                q = QuestService:Choose(level, r.Position)
-                self.SelectionLevel, self.SelectionSea = level, Runtime.Sea
-                self.NextQuestChoice = os.clock() + 2
+        if not (q and q.SeaProgress) then
+            local failure = q and QuestService.Failures[q.Key]
+            local failed = failure and os.clock() < failure.Until
+            local changed = self.SelectionLevel ~= level or self.SelectionSea ~= Runtime.Sea
+            if not engaged and not QuestService.PendingQuest and (not q or failed or changed) then
+                if q or os.clock() >= (self.NextQuestChoice or 0) then
+                    q = QuestService:Choose(level, r.Position)
+                    self.SelectionLevel, self.SelectionSea = level, Runtime.Sea
+                    self.NextQuestChoice = os.clock() + 2
+                end
             end
         end
     elseif owner == "Boss" then
@@ -8285,7 +10081,24 @@ function Controller:Step()
     if target and not targetHumanoid then
         local oldHumanoid = target:FindFirstChildOfClass("Humanoid") or self.LastHumanoid
         local killed = oldHumanoid and oldHumanoid.Health <= 0
-        if killed then Runtime.Counters.Targets = Runtime.Counters.Targets + 1 end
+        if killed then
+            Runtime.Counters.Targets = Runtime.Counters.Targets + 1
+            if q and q.SeaProgress and SeaProgressionService then
+                SeaProgressionService.Progress = nil
+                SeaProgressionService.NextProbe = 0
+                SeaProgressionService:SetStatus("Ice Admiral defeated · confirming Second Sea unlock")
+            end
+            if Config.HybridMastery then
+                self.HybridKills += 1
+                local nextNumber = self.HybridKills + 1
+                if self:HybridFruitTurn() then
+                    Runtime.HybridMasteryStatus = string.format("Target %d: strongest setup → Blox Fruit last hit", nextNumber)
+                else
+                    Runtime.HybridMasteryStatus = string.format("Target %d: strongest non-fruit full kill", nextNumber)
+                end
+            end
+        end
+        self.HybridFruitLockedTarget, self.HybridRecentHit, self.HybridCurrentTarget = nil, 0, nil
         Combat:Stop(); Runtime.Target = nil; self.LastHealth = nil
         self.NoTargetAt = os.clock()
         if owner == "Boss" and killed then
@@ -8303,6 +10116,14 @@ function Controller:Step()
     if not Runtime.Target then
         Runtime.Target = EnemyService:Select(q.Target, r.Position)
         self.LastHealth, self.DamageAt = nil, os.clock()
+        self.HybridFruitLockedTarget, self.HybridRecentHit = nil, 0
+        self.HybridCurrentTarget = Runtime.Target
+        if Config.HybridMastery and Runtime.Target then
+            local n = self.HybridKills + 1
+            Runtime.HybridMasteryStatus = self:HybridFruitTurn()
+                and string.format("Target %d: strongest setup → Blox Fruit last hit", n)
+                or string.format("Target %d: strongest non-fruit full kill", n)
+        end
         Runtime.M1Status = Runtime.Target and ("Ready on " .. q.Target) or "Waiting for target"
     end
     targetHumanoid, targetRoot, targetHitPart = EnemyService:Parts(Runtime.Target)
@@ -8325,19 +10146,49 @@ function Controller:Step()
 
     self.WaitAnchor = nil
     self.LastHumanoid = targetHumanoid
+    if self.HybridCurrentTarget ~= Runtime.Target then
+        self.HybridCurrentTarget, self.HybridFruitLockedTarget, self.HybridRecentHit = Runtime.Target, nil, 0
+    end
     if self.LastHealth == nil then
         self.DamageAt = os.clock()
     elseif targetHumanoid.Health < self.LastHealth then
+        local dealt = self.LastHealth - targetHumanoid.Health
+        if dealt > 0 then self.HybridRecentHit = math.max(self.HybridRecentHit * 0.8, dealt) end
         self.DamageAt = os.clock(); Runtime.ProgressAt = self.DamageAt; self.RecoveryCount = 0
         Runtime.M1Status = "Target health decreased (M1 or skill)"
     end
     self.LastHealth = targetHumanoid.Health
 
-    local finishing = Config.Mastery and targetHumanoid.MaxHealth > 0 and targetHumanoid.Health / targetHumanoid.MaxHealth * 100 <= Config.FinishPercent
-    local entry = WeaponService:Choose(finishing)
+    local hpPercent = targetHumanoid.MaxHealth > 0 and targetHumanoid.Health / targetHumanoid.MaxHealth * 100 or 100
+    local hybridFruitTurn = self:HybridFruitTurn()
+    local adaptiveFinishPercent = tonumber(Config.HybridFruitFinishPercent) or 45
+    if targetHumanoid.MaxHealth > 0 and self.HybridRecentHit > 0 then
+        local recentHitPercent = self.HybridRecentHit / targetHumanoid.MaxHealth * 100
+        adaptiveFinishPercent = math.max(adaptiveFinishPercent, math.min(80, recentHitPercent * 2.25))
+    end
+    local hybridFruitFinishing = Config.HybridMastery and hybridFruitTurn
+        and (self.HybridFruitLockedTarget == Runtime.Target or hpPercent <= adaptiveFinishPercent)
+    if hybridFruitFinishing then self.HybridFruitLockedTarget = Runtime.Target end
+
+    local finishing = (not Config.HybridMastery) and Config.Mastery and targetHumanoid.MaxHealth > 0 and hpPercent <= Config.FinishPercent
+    local entry
+    if Config.HybridMastery then
+        entry = hybridFruitFinishing and WeaponService:ChooseHybridFruit() or WeaponService:ChooseHybridPrimary()
+    else
+        entry = WeaponService:Choose(finishing)
+    end
     if not entry then
         Movement:Cancel("No usable weapon"); Combat:Stop()
-        state("WAIT_WEAPON", finishing and "Select an available mastery weapon" or "Equip or select a usable weapon")
+        if Config.HybridMastery and hybridFruitFinishing then
+            Runtime.HybridMasteryStatus = "Blox Fruit finisher required · no usable Blox Fruit tool detected"
+            state("WAIT_FRUIT", "Equip/replicate your Blox Fruit before the last hit")
+        elseif Config.HybridMastery then
+            Runtime.HybridMasteryStatus = Config.HybridPrimary == "Melee / kick style"
+                and "No usable melee/kick style detected" or "No usable non-fruit primary detected"
+            state("WAIT_WEAPON", Runtime.HybridMasteryStatus)
+        else
+            state("WAIT_WEAPON", finishing and "Select an available mastery weapon" or "Equip or select a usable weapon")
+        end
         return
     end
 
@@ -8349,6 +10200,18 @@ function Controller:Step()
     Combat:Observe(Runtime.Target, targetHumanoid, entry)
 
     local weaponType = entry.Data and entry.Data.WeaponType or "Unknown"
+    local hybridFruitPrep = Config.HybridMastery and hybridFruitTurn and not hybridFruitFinishing
+    if Config.HybridMastery then
+        local n = self.HybridKills + 1
+        if hybridFruitFinishing then
+            Runtime.HybridMasteryStatus = string.format("Target %d · FRUIT FINISH %.1f%% HP · %s", n, hpPercent, entry.Tool.Name)
+        elseif hybridFruitTurn then
+            Runtime.HybridMasteryStatus = string.format("Target %d · setup %.1f%% HP · switch ≤ %.0f%%", n, hpPercent, adaptiveFinishPercent)
+        else
+            Runtime.HybridMasteryStatus = string.format("Target %d · full non-fruit kill · %s", n, entry.Tool.Name)
+        end
+    end
+    local allowSkills = hybridFruitFinishing or (Config.AutoSkills and not hybridFruitPrep)
     local okPosition, destination = pcall(Movement.Position, Movement, targetRoot, entry.Data)
     if not okPosition or typeof(destination) ~= "CFrame" then
         local reason = okPosition and "Movement position returned no CFrame" or tostring(destination)
@@ -8375,43 +10238,58 @@ function Controller:Step()
         Combat:SetCameraTarget(targetHitPart or targetRoot)
     end
     if weaponType ~= "Gun" and not nearLocked and distance > 12 then
-        if Config.AutoSkills and CombatSkillService and os.clock() >= Combat.SwingUntil then
-            casting = CombatSkillService:Step(entry, targetHitPart or targetRoot)
+        if allowSkills and CombatSkillService and os.clock() >= Combat.SwingUntil then
+            casting = CombatSkillService:Step(entry, targetHitPart or targetRoot, hybridFruitFinishing)
         end
         state(casting and "ATTACK" or "TRAVEL_TO_TARGET", q.Target)
         Runtime.M1Status = string.format("Approaching locked target · %.1f studs", distance)
         return
     end
 
-    state("ATTACK", (finishing and "Mastery finish · " or "") .. q.Target)
+    state("ATTACK", Config.HybridMastery
+        and ((hybridFruitFinishing and "Blox Fruit last hit · ") or (hybridFruitTurn and "Hybrid setup · ") or "Strongest full kill · ") .. q.Target
+        or (finishing and "Mastery finish · " or "") .. q.Target)
     if weaponType == "Melee" then
-        -- Keep v1.4.8 Combat:Attack untouched. It is the M1 path confirmed to work.
-        -- After four successful native/input M1 requests, allow one skill attempt, then
-        -- immediately return to M1. A skill can no longer run before the basic chain.
+        -- The capture proves that a local Mouse1 request is not the authoritative success
+        -- signal. Count the server's RE/PlayAttackStartEffect acknowledgement instead.
+        local ackDriven = Runtime.AttackAckAvailable == true
+        if ackDriven and Combat.AckSequence > (Combat.LastCountedAckSequence or 0) then
+            local accepted = Combat.AckSequence - (Combat.LastCountedAckSequence or 0)
+            Combat.LastCountedAckSequence = Combat.AckSequence
+            Combat.ComboCount += accepted
+            Runtime.M1Status = string.format("Server accepted M1 · combo %d/4 · native index %s",
+                math.min(Combat.ComboCount, 4), tostring(Combat.LastAckCombo or "?"))
+            if Combat.ComboCount >= 4 then Combat.ComboPendingSkill = true end
+        end
+
         if Combat.ComboPendingSkill then
-            if Config.AutoSkills and CombatSkillService and os.clock() >= Combat.SwingUntil then
+            if allowSkills and CombatSkillService and os.clock() >= Combat.SwingUntil then
                 local beforeCast = CombatSkillService.LastCastAt
-                casting = CombatSkillService:Step(entry, targetHitPart or targetRoot)
+                casting = CombatSkillService:Step(entry, targetHitPart or targetRoot, hybridFruitFinishing)
                 if CombatSkillService.LastCastAt > beforeCast then
-                    Runtime.M1Status = "4 M1s complete · skill inserted"
+                    Runtime.M1Status = "4 server-accepted M1s complete · skill inserted"
                 end
                 Combat.ComboCount, Combat.ComboPendingSkill = 0, false
-            elseif not Config.AutoSkills then
+            elseif not allowSkills then
                 Combat.ComboCount, Combat.ComboPendingSkill = 0, false
             end
         end
 
         if not casting and not Combat.ComboPendingSkill then
             local fired = Combat:Attack(entry, targetRoot, targetHitPart or targetRoot)
-            if fired then
+            if fired and not ackDriven then
+                -- Compatibility fallback for executors/versions where the acknowledgement
+                -- event is unavailable.
                 Combat.ComboCount += 1
-                Runtime.M1Status = string.format("M1 requested · combo %d/4", math.min(Combat.ComboCount, 4))
+                Runtime.M1Status = string.format("M1 requested · fallback combo %d/4", math.min(Combat.ComboCount, 4))
                 if Combat.ComboCount >= 4 then Combat.ComboPendingSkill = true end
+            elseif fired then
+                Runtime.M1Status = "M1 input sent · awaiting native attack acknowledgement"
             end
         end
     else
-        if Config.AutoSkills and CombatSkillService and os.clock() >= Combat.SwingUntil then
-            casting = CombatSkillService:Step(entry, targetHitPart or targetRoot)
+        if allowSkills and CombatSkillService and os.clock() >= Combat.SwingUntil then
+            casting = CombatSkillService:Step(entry, targetHitPart or targetRoot, hybridFruitFinishing)
         end
         if not casting then Combat:Attack(entry, targetRoot, targetHitPart or targetRoot) end
     end
@@ -8450,6 +10328,12 @@ local function toggle(tab, key, name, sessionOnly)
             elseif key == "AutoBuyStyle" then PurchaseService.NextStyle = 0
             elseif key == "AutoBuyHaki" then PurchaseService.NextHaki = 0
             elseif key == "AutoCollectSpawnedFruits" and FruitPickupService then FruitPickupService:Bind(); FruitPickupService.Current = nil
+            elseif key == "GroundFruitESP" and FruitPickupService then
+                FruitPickupService:Bind()
+                FruitPickupService:VisualStep()
+            elseif key == "HybridMastery" then
+                if Controller then Controller:ResetHybrid("Hybrid mastery toggled") end
+                release("Hybrid mastery changed")
             elseif key == "AutoSkills" and not Config.AutoSkills and CombatSkillService then CombatSkillService.BusyUntil = 0 end
         end})
     return Controls[key]
@@ -8458,8 +10342,13 @@ local function dropdown(tab, key, name, options)
     Controls[key] = tab:CreateDropdown({Name = name, Options = options, CurrentOption = {Config[key]}, Flag = "BF_" .. key,
         Callback = function(v)
             Config[key] = type(v) == "table" and v[1] or v
-            if key == "Boss" or key == "Enemy" or key == "Movement" or key == "Weapon" or key == "WeaponMode" or key == "MasteryWeapon" then release("Selection changed") end
-            if key == "FruitDealer" and FruitShopService then FruitShopService.Next = 0; FruitShopService.Stock = {}; FruitShopService.Display = {}; FruitShopService.DisplayToInternal = {} end
+            if key == "Boss" or key == "Enemy" or key == "Movement" or key == "Weapon" or key == "WeaponMode" or key == "MasteryWeapon"
+                or key == "HybridPrimary" or key == "HybridMeleeWeapon" or key == "HybridFruitWeapon" then
+                if Controller and Config.HybridMastery and (key == "HybridPrimary" or key == "HybridMeleeWeapon" or key == "HybridFruitWeapon") then Controller:ResetHybrid("Hybrid selection changed") end
+                release("Selection changed")
+            end
+            if key == "FruitDealer" and FruitShopService then FruitShopService.Next = 0; FruitShopService:UseDealer(Config.FruitDealer); Runtime.FruitShopStatus = "Selected " .. tostring(Config.FruitDealer) .. " dealer · refresh to update live stock" end
+            if key == "SpawnedFruitTravel" and FruitPickupService then FruitPickupService.Current = nil; Runtime.FruitPickupStatus = "Ground fruit travel: " .. tostring(Config.SpawnedFruitTravel) end
         end})
     return Controls[key]
 end
@@ -8477,6 +10366,8 @@ local function stopAll()
         Config[key] = false
         if Controls[key] then Controls[key]:Set(false) end
     end
+    if FruitShopService and FruitShopService.CancelTravel then FruitShopService:CancelTravel("Stopped by user") end
+    if PurchaseService and PurchaseService.ResetTravel then PurchaseService:ResetTravel("Stopped by user") end
     release("Stopped by user"); Runtime.Owner = nil; state("IDLE", "Stopped")
 end
 local function refreshDropdown(control, key, options)
@@ -8499,14 +10390,20 @@ local function refreshDropdown(control, key, options)
 end
 local function refreshChoices()
     WeaponService.Dirty = true; WeaponService:Refresh()
-    local weapons = {"Auto"}; local mastery = {"Select weapon"}; local seen = {}
+    local weapons = {"Auto"}; local mastery = {"Select weapon"}; local melee = {"Auto melee / kick style"}; local fruitWeapons = {"Auto fruit"}; local seen = {}
     for _, entry in ipairs(WeaponService.List) do
         if not seen[entry.Tool.Name] then
             seen[entry.Tool.Name] = true; table.insert(weapons, entry.Tool.Name); table.insert(mastery, entry.Tool.Name)
+            local weaponType = entry.Data and entry.Data.WeaponType or "Unknown"
+            if weaponType == "Melee" then table.insert(melee, entry.Tool.Name) end
+            if weaponType == "Demon Fruit" then table.insert(fruitWeapons, entry.Tool.Name) end
         end
     end
+    table.sort(melee); table.sort(fruitWeapons)
     refreshDropdown(Controls.Weapon, "Weapon", weapons)
     refreshDropdown(Controls.MasteryWeapon, "MasteryWeapon", mastery)
+    refreshDropdown(Controls.HybridMeleeWeapon, "HybridMeleeWeapon", melee)
+    refreshDropdown(Controls.HybridFruitWeapon, "HybridFruitWeapon", fruitWeapons)
     local bosses, enemies, seenB, seenE = {"Auto available"}, {"Select enemy"}, {}, {}
     for _, q in ipairs(QuestService.Records) do
         if q.Boss then if not seenB[q.Target] then table.insert(bosses, q.Target); seenB[q.Target] = true end
@@ -8518,8 +10415,9 @@ local function refreshChoices()
     end
     table.sort(bosses); table.sort(enemies)
     refreshDropdown(Controls.Boss, "Boss", bosses); refreshDropdown(Controls.Enemy, "Enemy", enemies)
-    if FruitShopService and #FruitShopService.Display > 0 then
-        local fruits = {"Select fruit"}; for _, name in ipairs(FruitShopService.Display) do table.insert(fruits, name) end
+    if FruitShopService then
+        FruitShopService:UseDealer(Config.FruitDealer)
+        local fruits = {"Select fruit"}; for _, name in ipairs(FruitShopService.Display or {}) do table.insert(fruits, name) end
         refreshDropdown(Controls.StockFruit, "StockFruit", fruits)
     end
 end
@@ -8555,7 +10453,9 @@ local function buildUI()
     -- FARM -----------------------------------------------------------------
     farm:CreateSection("Main farm")
     toggle(farm, "AutoLevel", "Auto Level", true)
+    toggle(farm, "AutoSeaProgression", "Automatically unlock the next sea at the level requirement")
     Runtime.FarmLabel = farm:CreateLabel("Status: loading")
+    Runtime.SeaProgressLabel = farm:CreateParagraph({Title = "Sea progression", Content = Runtime.SeaProgressStatus})
     dropdown(farm, "WeaponMode", "Use", {"Auto", "Equipped", "Melee", "Sword", "Gun", "Fruit"})
     dropdown(farm, "Weapon", "Weapon", {"Auto"})
     farm:CreateButton({Name = "Refresh weapons", Callback = refreshChoices})
@@ -8589,6 +10489,11 @@ local function buildUI()
     dropdown(farm, "Movement", "Travel", {"Smooth", "Walk"})
     slider(farm, "Speed", "Smooth speed", 25, 250, 5, " studs/s")
     toggle(farm, "NoCollision", "Pass through obstacles")
+    toggle(farm, "AvoidWater", "Never touch damaging water")
+    slider(farm, "WaterClearance", "Water clearance", 12, 45, 1, " studs")
+    toggle(farm, "AutoCheckpoint", "Set verified sea checkpoint automatically")
+    farm:CreateLabel("Sea 1: Ice / Sky / Sky2 / Fishman · Sea 2: DressTown / Greenb / Graveyard / Snowy / Ice-Fire / Ship / IceCastle / ForgottenIsland")
+    farm:CreateLabel("Water safety forces Smooth motion so Walk cannot route into the ocean")
     slider(farm, "OrbitRadius", "Orbit radius", 2, 35, 0.5, " studs")
     slider(farm, "OrbitSpeed", "Orbit speed", 5, 120, 5, " degrees/s")
 
@@ -8606,7 +10511,19 @@ local function buildUI()
     farm:CreateSection("Target rules · advanced", true)
     toggle(farm, "AvoidContested", "Avoid contested enemies")
     slider(farm, "ContestedSeconds", "Other-player damage window", 2, 12, 1, "s")
-    toggle(farm, "Mastery", "Mastery finishing")
+
+    farm:CreateSection("Hybrid mastery · alternating kills", true)
+    toggle(farm, "HybridMastery", "Hybrid non-fruit + Blox Fruit mastery")
+    dropdown(farm, "HybridPrimary", "Primary mastery", {"Strongest non-fruit", "Melee / kick style", "Farm weapon"})
+    dropdown(farm, "HybridMeleeWeapon", "Kick / melee style", {"Auto melee / kick style"})
+    dropdown(farm, "HybridFruitWeapon", "Blox Fruit finisher", {"Auto fruit"})
+    slider(farm, "HybridFruitFinishPercent", "Fruit handoff below HP", 10, 80, 5, "%")
+    Runtime.HybridMasteryLabel = farm:CreateParagraph({Title = "Hybrid cycle", Content = "Target 1: strongest non-fruit full kill\nTarget 2: primary damage, then Blox Fruit gets the last hit\nRepeats 1 → 2 → 1 → 2."})
+    farm:CreateLabel("Fruit-finisher targets suppress primary skills before the handoff to reduce accidental kills")
+
+    farm:CreateSection("Single-weapon mastery finishing", true)
+    farm:CreateLabel("Hybrid mastery takes priority over this section while enabled")
+    toggle(farm, "Mastery", "Use one finishing weapon")
     dropdown(farm, "MasteryWeapon", "Finishing weapon", {"Select weapon"})
     slider(farm, "FinishPercent", "Switch below HP", 5, 80, 5, "%")
 
@@ -8629,18 +10546,25 @@ local function buildUI()
     dropdown(progress, "FightingStyle", "Fighting style", STYLE_NAMES)
     toggle(progress, "AutoBuyStyle", "Auto buy style when eligible", true)
     progress:CreateButton({Name = "Buy style now", Callback = function() PurchaseService.NextStyle = 0; PurchaseService:BuyStyle(true) end})
+    progress:CreateButton({Name = "Go to style teacher", Callback = function() PurchaseService:BeginTeacherTravel(Config.FightingStyle, true) end})
     Runtime.PurchaseLabel = progress:CreateParagraph({Title = "Purchase status", Content = "Idle"})
+    Runtime.PurchaseRequirementsLabel = progress:CreateParagraph({Title = "Readiness / prerequisites", Content = "Reading balances and selected requirements…"})
+    progress:CreateButton({Name = "Refresh readiness", Callback = function() if Runtime.PurchaseRequirementsLabel then Runtime.PurchaseRequirementsLabel:Set({Title = "Readiness / prerequisites", Content = PurchaseService:RequirementsText()}) end end})
 
     progress:CreateSection("Haki & abilities")
     dropdown(progress, "HakiAbility", "Ability", HAKI_NAMES)
     toggle(progress, "AutoBuyHaki", "Auto buy when eligible", true)
     progress:CreateButton({Name = "Buy selected ability now", Callback = function() PurchaseService.NextHaki = 0; PurchaseService:BuyHaki(true) end})
+    progress:CreateButton({Name = "Go to ability teacher", Callback = function() PurchaseService:BeginAbilityTravel(Config.HakiAbility, true) end})
     progress:CreateLabel("Teacher travel and normal prerequisites are respected")
 
     -- FRUITS ---------------------------------------------------------------
     fruits:CreateSection("World fruits")
+    toggle(fruits, "GroundFruitESP", "Ground fruit ESP")
     toggle(fruits, "AutoCollectSpawnedFruits", "Collect naturally spawned fruits")
+    dropdown(fruits, "SpawnedFruitTravel", "Pickup movement", {"Tween", "Teleport"})
     toggle(fruits, "AutoStoreSpawnedFruits", "Store after pickup")
+    fruits:CreateLabel("Only true world-spawned fruit is targeted · anything held/equipped by a player is ignored")
     Runtime.FruitPickupLabel = fruits:CreateParagraph({Title = "World fruit", Content = "No natural fruit detected"})
 
     fruits:CreateSection("Zioles")
@@ -8651,12 +10575,17 @@ local function buildUI()
 
     fruits:CreateSection("Fruit dealer", true)
     dropdown(fruits, "FruitDealer", "Dealer", {"Normal", "Advanced"})
-    dropdown(fruits, "StockFruit", "Fruit", {"Select fruit"})
+    dropdown(fruits, "StockFruit", "In-stock fruit", {"Select fruit"})
     dropdown(fruits, "DragonType", "Dragon type", {"East", "West"})
     toggle(fruits, "AutoBuyStockFruit", "Auto buy when in stock", true)
-    fruits:CreateButton({Name = "Refresh stock", Callback = function() FruitShopService.Next = 0; FruitShopService:Refresh(true) end})
+    fruits:CreateButton({Name = "Refresh selected dealer", Callback = function() FruitShopService.Next = 0; FruitShopService:Refresh(true) end})
+    fruits:CreateButton({Name = "Refresh Normal + Advanced stock", Callback = function() FruitShopService:RefreshAll(true) end})
+    fruits:CreateButton({Name = "Go to selected dealer", Callback = function() FruitShopService:BeginDealerTravel(Config.FruitDealer) end})
+    fruits:CreateButton({Name = "Stop dealer travel", Callback = function() FruitShopService:CancelTravel("Stopped by user") end})
     fruits:CreateButton({Name = "Buy selected fruit", Callback = function() FruitShopService:BuySelected(true) end})
     Runtime.FruitShopLabel = fruits:CreateParagraph({Title = "Dealer", Content = "Stock has not been checked"})
+    Runtime.FruitSelectedLabel = fruits:CreateParagraph({Title = "Selected fruit", Content = "Select an in-stock fruit"})
+    Runtime.FruitStockLabel = fruits:CreateParagraph({Title = "Live stock + location", Content = "Press Refresh Normal + Advanced stock to load both dealer inventories."})
 
     -- UTILITY --------------------------------------------------------------
     utility:CreateSection("Server finder")
@@ -8714,8 +10643,15 @@ function Runtime:DiagnosticText()
         "Target: " .. (self.Target and self.Target.Name or "None") .. " | HP: " .. (h and math.floor(h.Health) or "?"),
         "Distance: " .. (r and targetRoot and string.format("%.1f", (r.Position-targetRoot.Position).Magnitude) or "?") .. " | Weapon: " .. tostring(self.Weapon or "None"),
         "Combat: " .. tostring(self.CombatPath or "Idle") .. " | M1: " .. tostring(self.M1Status or "Waiting") .. " | Dodge: " .. tostring(self.DodgeStatus or "Watching"),
-        "Movement: " .. (Movement.Connection and Config.Movement or "Stopped") .. " | Owner: " .. tostring(self.Owner) .. " | Goal: " .. (Movement.Goal and string.format("%.1f, %.1f, %.1f", Movement.Goal.Position.X, Movement.Goal.Position.Y, Movement.Goal.Position.Z) or "None"),
+        "Movement: " .. (Movement.Connection and (Movement.EffectiveMode or Config.Movement) or "Stopped") .. " | Owner: " .. tostring(self.Owner) .. " | Goal: " .. (Movement.Goal and string.format("%.1f, %.1f, %.1f", Movement.Goal.Position.X, Movement.Goal.Position.Y, Movement.Goal.Position.Z) or "None"),
+        "Water safety: " .. tostring(self.WaterSafetyStatus or (Config.AvoidWater and "Armed" or "Off")),
+        "Hybrid mastery: " .. tostring(self.HybridMasteryStatus or "Off") .. " | Alternating kills: " .. tostring(Controller and Controller.HybridKills or 0),
         "Region: " .. tostring(RegionService and RegionService.Status or "Unknown"),
+        "Attack ack: " .. (self.AttackAckAvailable and ("combo " .. tostring(self.AttackAckCombo) .. " · " .. tostring(self.AttackAckWeapon) .. " · observed window " .. tostring(self.AttackAckWindow) .. "s") or "not bound"),
+        "Passive damage ack: " .. (self.DamageAckAvailable and (tostring(self.DamageAckCount or 0) .. " · last " .. tostring(self.DamageAckValue or 0)) or "not bound"),
+        "Skill route: " .. tostring(self.SkillRemoteStatus or "Unknown"),
+        "Quest progress: " .. tostring(self.QuestProgressStatus or "Unknown"),
+        "Checkpoint: " .. tostring(self.CheckpointStatus or "Unknown"),
         "Recovery: " .. self.LastRecovery, "Last error: " .. self.LastError,
         "Farm time: " .. math.floor(self.FarmSeconds) .. "s | Quest completions observed: " .. self.Counters.Quests,
         "Fruits collected: " .. tostring(self.Counters.FruitsCollected) .. " | Fruit pickup: " .. tostring(self.FruitPickupStatus),
@@ -8729,6 +10665,7 @@ function Runtime:DiagnosticText()
 end
 local okUI, errorUI = xpcall(buildUI, TRACEBACK)
 if not okUI then log("Error", errorUI); Runtime:Shutdown("UI initialization failed"); warn("PuckAFK: " .. tostring(errorUI)); return end
+Movement:BindWaterGuard()
 QuestService:SyncActive(true)
 for key, names in pairs({LiveQuests={"Quests"},Guide={"GuideModule"},GuideData={"GuideModule","GuideData"},Combat={"Controllers","CombatController"},CombatUtil={"Modules","CombatUtil"},Realm={"Util","Realm"}}) do loadModule(key,names) end
 local antiAFKFailed = false
@@ -8770,7 +10707,7 @@ end)
 local questEventBound = false
 local nextUI, nextChoices, lastTick, nextOptional, nextModuleRetry = 0, 0, os.clock(), 0, os.clock() + 5
 Runtime.Ready = true
-PrivacyService:Step(); ServerService.Next = 0; FruitShopService.Next = 0; FruitPickupService:Bind()
+PrivacyService:Step(); ServerService.Next = 0; FruitShopService.Next = 0; FruitPickupService:Bind(); task.defer(function() if Runtime.Running then task.wait(0.8); FruitShopService:RefreshAll(true) end end)
 notify("Loaded on " .. tostring(EXECUTOR_NAME) .. ". " .. (IS_REAL and "Real compatibility mode is active." or "Generic executor mode is active."))
 Runtime.Loop = task.defer(function()
     while Runtime.Running do
@@ -8779,6 +10716,9 @@ Runtime.Loop = task.defer(function()
         lastTick = now
         local success, err = xpcall(function()
             WorldService:Refresh(); EnemyService:Bind(); EnemyService:UpdateDamageOwnership(); FruitPickupService:Bind()
+            CombatRemoteObserver:Bind()
+            DamageRemoteObserver:Bind()
+            if RegionService then RegionService:Step() end
             if now >= nextModuleRetry then
                 nextModuleRetry = now + 10
                 for key, names in pairs({LiveQuests={"Quests"},Guide={"GuideModule"},GuideData={"GuideModule","GuideData"},Combat={"Controllers","CombatController"},CombatUtil={"Modules","CombatUtil"},Realm={"Util","Realm"}}) do
@@ -8794,6 +10734,35 @@ Runtime.Loop = task.defer(function()
                         Runtime.ActiveQuestKnown = true
                         QuestService.PendingUntil = 0
                         QuestService.PendingQuest = nil
+
+                        -- Captured QuestUpdate payloads expose Info.Task + Progress and send
+                        -- (nil, {Context="Complete", ...}) on completion. Treat that event as
+                        -- authoritative progress so a successful kill also refreshes recovery
+                        -- timers even when local health-change observation missed the hit.
+                        local oldKey, oldValue = Runtime.QuestProgressKey, Runtime.QuestProgressValue or 0
+                        if type(active) == "table" and type(active.Info) == "table" and type(active.Info.Task) == "table" then
+                            local progressTarget, required = next(active.Info.Task)
+                            local current = type(active.Progress) == "table" and tonumber(active.Progress[progressTarget]) or 0
+                            required, current = tonumber(required) or 0, tonumber(current) or 0
+                            local progressKey = tostring(active.InternalQuestName or "?") .. ":" .. tostring(progressTarget)
+                            Runtime.QuestProgressKey = progressKey
+                            Runtime.QuestProgressValue = current
+                            Runtime.QuestProgressStatus = string.format("%s · %d/%d", tostring(progressTarget), current, required)
+                            if progressKey == oldKey and current > oldValue then
+                                Runtime.ProgressAt = os.clock()
+                                if Controller then
+                                    Controller.DamageAt = Runtime.ProgressAt
+                                    Controller.RecoveryCount = 0
+                                end
+                            end
+                        elseif context and context.Context == "Complete" then
+                            Runtime.QuestProgressStatus = tostring(context.Name or context.InternalQuestName or "Quest") .. " · complete"
+                            Runtime.QuestProgressKey, Runtime.QuestProgressValue = nil, 0
+                        elseif not active then
+                            Runtime.QuestProgressStatus = "No active quest"
+                            Runtime.QuestProgressKey, Runtime.QuestProgressValue = nil, 0
+                        end
+
                         if context and context.Context == "Complete" then
                             Runtime.Counters.Quests = Runtime.Counters.Quests + 1
                             if Runtime.Owner == "Boss" and Runtime.Quest and Runtime.Quest.Id == context.InternalQuestName and not Config.RepeatBoss then
@@ -8829,6 +10798,9 @@ Runtime.Loop = task.defer(function()
             end
             if now >= nextUI then
                 nextUI = now + 0.5
+                -- Ground-fruit visuals are maintained independently of PuckUI so an
+                -- unrelated UI capability error cannot leave stale ESP on a held fruit.
+                if FruitPickupService then FruitPickupService:VisualStep() end
                 -- Runtime UI is observational only. Never allow a Real executor UI
                 -- capability error to interrupt Controller:Step/combat/movement.
                 local uiOK, uiErr = pcall(function()
@@ -8836,13 +10808,18 @@ Runtime.Loop = task.defer(function()
                     local sea = Runtime.Sea or "Detecting"
                     Runtime.StatusLabel:Set({Title = Runtime.State:gsub("_", " "), Content = Runtime.Detail .. "\n" .. sea .. " · Level " .. tostring(value(data,"Level","?")) .. " · " .. math.floor(Runtime.FarmSeconds/60) .. "m farming\nQuest: " .. (Runtime.Quest and (Runtime.Quest.Name or Runtime.Quest.Target) or "None") .. "\nWeapon: " .. tostring(Runtime.Weapon or "None")})
                     Runtime.FarmLabel:Set(Runtime.Detail)
+                    if Runtime.SeaProgressLabel then Runtime.SeaProgressLabel:Set({Title = "Sea progression", Content = tostring(Runtime.SeaProgressStatus or "Idle")}) end
                     if Runtime.ServerLabel then Runtime.ServerLabel:Set({Title = "Population", Content = Runtime.ServerStatus}) end
                     if Runtime.GachaLabel then Runtime.GachaLabel:Set({Title = "Zioles", Content = Runtime.GachaStatus .. "\nBeli: $" .. tostring(beli())}) end
                     if Runtime.FruitShopLabel then Runtime.FruitShopLabel:Set({Title = "Fruit dealer", Content = Runtime.FruitShopStatus}) end
-                    if Runtime.FruitPickupLabel then Runtime.FruitPickupLabel:Set({Title = "Map fruit", Content = Runtime.FruitPickupStatus .. "\nCollected this session: " .. tostring(Runtime.Counters.FruitsCollected)}) end
+                    if Runtime.FruitSelectedLabel then Runtime.FruitSelectedLabel:Set({Title = "Selected fruit", Content = FruitShopService:SelectedText()}) end
+                    if Runtime.FruitStockLabel then Runtime.FruitStockLabel:Set({Title = "Live stock + location", Content = FruitShopService:StockText()}) end
+                    if Runtime.FruitPickupLabel then Runtime.FruitPickupLabel:Set({Title = "Map fruit", Content = Runtime.FruitPickupStatus .. "\nESP: " .. (Config.GroundFruitESP and "ON" or "OFF") .. " · Travel: " .. tostring(Config.SpawnedFruitTravel) .. "\nCollected this session: " .. tostring(Runtime.Counters.FruitsCollected)}) end
                     if Runtime.PurchaseLabel then Runtime.PurchaseLabel:Set({Title = "Purchases", Content = Runtime.PurchaseStatus}) end
+                    if Runtime.PurchaseRequirementsLabel then Runtime.PurchaseRequirementsLabel:Set({Title = "Readiness / prerequisites", Content = PurchaseService:RequirementsText()}) end
                     local targetClaim = Runtime.Target and (EnemyService:IsOurs(Runtime.Target) and "Ours" or EnemyService:IsContested(Runtime.Target) and "Contested" or "Free") or "None"
-                    Runtime.DiagnosticsLabel:Set({Title = "Runtime", Content = "State: " .. Runtime.State .. "\nSea: " .. sea .. "\nTarget: " .. (Runtime.Target and Runtime.Target.Name or "None") .. " · " .. targetClaim .. "\nCombat: " .. tostring(Runtime.CombatPath or "Idle") .. "\nM1: " .. tostring(Runtime.M1Status or "Waiting") .. "\nCamera: " .. tostring(Runtime.CameraStatus or "Idle") .. "\nDodge: " .. tostring(Runtime.DodgeStatus or "Watching") .. "\nPosition: " .. tostring(Runtime.PositionStatus or Config.Position) .. "\nMovement: " .. (Movement.Connection and (Movement.EffectiveMode or Config.Movement) or "Stopped") .. "\nRegion: " .. tostring(RegionService and RegionService.Status or "Unknown") .. "\nFruit: " .. Runtime.FruitPickupStatus .. "\nServer: " .. Runtime.ServerStatus .. "\nRecovery: " .. Runtime.LastRecovery .. "\nError: " .. Runtime.LastError})
+                    Runtime.DiagnosticsLabel:Set({Title = "Runtime", Content = "State: " .. Runtime.State .. "\nSea: " .. sea .. "\nTarget: " .. (Runtime.Target and Runtime.Target.Name or "None") .. " · " .. targetClaim .. "\nCombat: " .. tostring(Runtime.CombatPath or "Idle") .. "\nM1: " .. tostring(Runtime.M1Status or "Waiting") .. "\nAttack ack: " .. (Runtime.AttackAckAvailable and ("combo " .. tostring(Runtime.AttackAckCombo) .. " · observed " .. tostring(Runtime.AttackAckWindow) .. "s") or "not bound") .. "\nPassive damage ack: " .. (Runtime.DamageAckAvailable and (tostring(Runtime.DamageAckCount or 0) .. " · last " .. tostring(Runtime.DamageAckValue or 0)) or "not bound") .. "\nSkill route: " .. tostring(Runtime.SkillRemoteStatus or "Unknown") .. "\nQuest: " .. tostring(Runtime.QuestProgressStatus or "Unknown") .. "\nCheckpoint: " .. tostring(Runtime.CheckpointStatus or "Unknown") .. "\nSea progression: " .. tostring(Runtime.SeaProgressStatus or "Idle") .. "\nHybrid: " .. tostring(Runtime.HybridMasteryStatus or "Off") .. "\nCamera: " .. tostring(Runtime.CameraStatus or "Idle") .. "\nDodge: " .. tostring(Runtime.DodgeStatus or "Watching") .. "\nPosition: " .. tostring(Runtime.PositionStatus or Config.Position) .. "\nMovement: " .. (Movement.Connection and (Movement.EffectiveMode or Config.Movement) or "Stopped") .. "\nWater: " .. tostring(Runtime.WaterSafetyStatus or (Config.AvoidWater and "Armed" or "Off")) .. "\nRegion: " .. tostring(RegionService and RegionService.Status or "Unknown") .. "\nFruit: " .. Runtime.FruitPickupStatus .. "\nServer: " .. Runtime.ServerStatus .. "\nRecovery: " .. Runtime.LastRecovery .. "\nError: " .. Runtime.LastError})
+                    if Runtime.HybridMasteryLabel then Runtime.HybridMasteryLabel:Set({Title = "Hybrid cycle", Content = tostring(Runtime.HybridMasteryStatus or "Off") .. "\nCompleted alternating kills: " .. tostring(Controller.HybridKills or 0)}) end
                 end)
                 if not uiOK then log("UI", "Runtime UI update skipped: " .. tostring(uiErr)) end
             end
